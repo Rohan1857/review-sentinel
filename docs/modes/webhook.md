@@ -1,0 +1,199 @@
+# Webhook Mode
+
+The webhook server provides real-time, interactive code reviews. Mention the bot in a PR comment and it responds — with full conversation continuity across multiple interactions.
+
+## What It Does
+
+- Listens for GitHub/GitLab webhook events on PR comments and lifecycle events
+- Runs the reviewer bot in response to `@mentions`
+- Supports multi-turn conversations within the same PR (conversation continuity)
+- Auto-triggers reviews on PR open, push, reopen, or ready-for-review events
+
+## Configuration
+
+The recommended way to configure the webhook server is with a [YAML config file](../reference/configuration.md#yaml-config-file). Environment variables can be used as overrides or as the sole configuration method for simple setups.
+
+=== "YAML + GitHub (PAT)"
+
+    ```yaml
+    # config.yaml
+    reviewer:
+      bot_username: "my-reviewer"
+      triggers:
+        - pr_opened
+
+    access:
+      allowed_users:
+        - alice
+        - bob
+    ```
+
+    ```bash
+    export GITHUB_TOKEN=ghp_...
+    export GITHUB_WEBHOOK_SECRET=your-secret
+    export CONFIG_PATH=config.yaml   # optional if config.yaml is in CWD
+    ```
+
+=== "YAML + GitHub (App)"
+
+    ```yaml
+    # config.yaml
+    reviewer:
+      bot_username: "my-reviewer"
+      triggers:
+        - pr_opened
+
+    access:
+      allowed_users:
+        - alice
+        - bob
+    ```
+
+    ```bash
+    export GITHUB_APP_ID=12345
+    export GITHUB_APP_PRIVATE_KEY_PATH=/path/to/private-key.pem
+    export GITHUB_WEBHOOK_SECRET=your-secret
+    export CONFIG_PATH=config.yaml
+    ```
+
+=== "YAML + GitLab"
+
+    ```yaml
+    # config.yaml
+    reviewer:
+      bot_username: "my-reviewer"
+      triggers:
+        - pr_opened
+
+    access:
+      allowed_users:
+        - alice
+        - bob
+    ```
+
+    ```bash
+    export GITLAB_TOKEN=glpat-...
+    export GITLAB_WEBHOOK_SECRET=your-secret
+    export CONFIG_PATH=config.yaml
+    ```
+
+=== "Env vars only (GitHub)"
+
+    ```bash
+    REVIEWER_BOT_USERNAME=my-reviewer
+    ALLOWED_USERS=alice,bob
+    GITHUB_TOKEN=ghp_...
+    GITHUB_WEBHOOK_SECRET=your-secret
+    ```
+
+Secrets (tokens, webhook secrets, API keys) are kept separate from the config YAML — as environment variables in standalone mode, or in Kubernetes Secret manifests for K8s deployments. See [Configuration](../reference/configuration.md) for the full YAML schema and [Environment Variables](../reference/env-vars.md) for all supported variables.
+
+You also need a publicly reachable server (or a tunnel like ngrok for development). See [GitHub](../platforms/github.md) or [GitLab](../platforms/gitlab.md) for webhook setup instructions.
+
+## Running the Server
+
+The fastest way to start the server is with the Makefile:
+
+```bash
+# Set your secrets as env vars, then:
+make -C deploy serve
+```
+
+This uses the config at `deploy/local/config.yaml` and validates that required env vars are set. See [Standalone Deployment](../deployment/standalone.md) for the full setup guide.
+
+For Kubernetes deployment, see [Kubernetes Deployment](../deployment/kubernetes.md).
+
+You should see:
+
+```
+INFO  Starting server on 0.0.0.0:8080 | platforms=['github'] | reviewer=@my-reviewer | allowed_users=...
+INFO  Server is running, waiting for webhooks...
+```
+
+## Triggering Reviews
+
+### @mention
+
+Mention the bot in a PR comment:
+
+```
+@my-reviewer please review this
+@my-reviewer focus on security
+```
+
+The bot reacts with an eyes emoji and then posts a structured code review.
+
+### Auto-Trigger
+
+The reviewer can run automatically on PR lifecycle events without requiring an `@mention`:
+
+=== "YAML"
+
+    ```yaml
+    reviewer:
+      triggers:
+        - pr_opened
+        - pr_push
+    ```
+
+=== "Env var"
+
+    ```bash
+    REVIEWER_TRIGGERS=pr_opened,pr_push
+    ```
+
+See [Auto-Trigger](../reference/configuration.md#auto-trigger) for the full event mapping and rules.
+
+## Multi-Platform Setup {: #multi-platform }
+
+To handle both GitHub and GitLab simultaneously, configure tokens for both platforms. Non-secret settings go in the YAML file:
+
+=== "YAML"
+
+    ```yaml
+    reviewer:
+      bot_username: "my-reviewer"
+
+    access:
+      allowed_users:
+        - alice
+        - bob
+    ```
+
+    ```bash
+    # GitHub
+    export GITHUB_TOKEN=ghp_...
+    export GITHUB_WEBHOOK_SECRET=gh-secret
+
+    # GitLab
+    export GITLAB_TOKEN=glpat-...
+    export GITLAB_WEBHOOK_SECRET=gl-secret
+    export GITLAB_API_BASE=https://gitlab.example.com
+    ```
+
+=== "Env vars only"
+
+    ```bash
+    # Bot config
+    REVIEWER_BOT_USERNAME=my-reviewer
+    ALLOWED_USERS=alice,bob
+
+    # GitHub
+    GITHUB_TOKEN=ghp_...
+    GITHUB_WEBHOOK_SECRET=gh-secret
+
+    # GitLab
+    GITLAB_TOKEN=glpat-...
+    GITLAB_WEBHOOK_SECRET=gl-secret
+    GITLAB_API_BASE=https://gitlab.example.com
+    ```
+
+Both platforms share the same bot usernames and allowed users list. Each platform gets its own webhook route (`/webhooks/github` and `/webhooks/gitlab`).
+
+## What's Different
+
+Webhook mode is the only mode with conversation continuity — multi-turn conversations carry context across comments on the same PR. It requires a running server and the Claude Code CLI. See the [mode comparison](../reference/configuration.md#mode-comparison) for a full breakdown.
+
+For the complete configuration reference, see [Configuration](../reference/configuration.md) and [Environment Variables](../reference/env-vars.md).
+
+For deployment options, see [Deployment](../deployment/index.md).

@@ -1,0 +1,22 @@
+webhook:
+  host: "0.0.0.0"
+  port: 8080
+
+reviewer:
+  bot_username: "review_sentinelbot"
+  triggers:
+    - pr_opened
+
+agent:
+  provider: "google"
+
+redis:
+  url: "redis://redis.review-sentinel.svc.cluster.local:6379/0"
+
+kubernetes:
+  image: "ghcr.io/Rohan1857/review-sentinel:latest"
+  namespace: "review-sentinel"
+  image_pull_policy: "Always"
+  active_deadline_seconds: 600
+  env_from_secrets:
+    - "review-sentinel-secrets"

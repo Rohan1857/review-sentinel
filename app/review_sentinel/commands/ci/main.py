@@ -1,0 +1,159 @@
+from __future__ import annotations
+
+import logging
+
+from environs import Env
+
+from review_sentinel.config import Config, load_config
+from review_sentinel.llm.cost import aggregate_cost_summary, format_cost_summary
+from review_sentinel.models import ProviderName
+from review_sentinel.platforms import build_platform
+from review_sentinel.platforms.base import PlatformName, PullRequestEvent
+from review_sentinel.review.reviewer import ReviewResult, run_and_post_review
+
+_env: Env = Env()
+logger: logging.Logger = logging.getLogger(__name__)
+
+
+async def run_ci_review(platform_name: str) -> int:
+    """
+    Run a CI-triggered review for the given platform.
+
+    Reads environment variables, builds the event and platform client,
+    runs the review using an LLM API, and posts results.
+
+    Args:
+        platform_name (str): Platform identifier ("github" or "gitlab").
+
+    Returns:
+        int: Exit code (0 on success, 1 on failure).
+    """
+
+    try:
+        resolved_platform_name: PlatformName = PlatformName(platform_name)
+    except ValueError:
+        logger.error("Unknown platform: %s", platform_name)
+
+        return 1
+
+    try:
+        config: Config = _build_ci_config()
+    except ValueError as exc:
+        logger.error("%s", exc)
+
+        return 1
+
+    try:
+        platform = build_platform(resolved_platform_name, config)
+    except ValueError as exc:
+        logger.error("%s", exc)
+
+        return 1
+
+    event: PullRequestEvent = _build_ci_event(resolved_platform_name)
+    workspace_path: str = _resolve_ci_workspace(resolved_platform_name)
+
+    custom_prompt: str = _env.str("INPUT_PROMPT", "")
+
+    logger.info(
+        "Running CI review for %s#%d on %s (workspace=%s)",
+        event.repo_full_name,
+        event.pr_number,
+        platform_name,
+        workspace_path,
+    )
+
+    try:
+        result: ReviewResult = await run_and_post_review(
+            event=event,
+            prompt=custom_prompt,
+            config=config,
+            platform=platform,
+            workspace_path=workspace_path,
+        )
+    except RuntimeError:
+        logger.exception("Failed to run review")
+
+        return 1
+
+    except Exception:
+        logger.exception("Unexpected error running review")
+
+        return 1
+
+    cost_info: str = format_cost_summary(
+        cost=aggregate_cost_summary(
+            reviewer=result.cost,
+            sub_agents=result.sub_agent_costs,
+        ),
+    )
+
+    logger.info(
+        "CI review posted for %s#%d (findings=%d)%s",
+        event.repo_full_name,
+        event.pr_number,
+        len(result.valid_findings),
+        cost_info,
+    )
+
+    return 0
+
+
+def _build_ci_event(platform_name: PlatformName) -> PullRequestEvent:
+    """
+    Build a PullRequestEvent from CI-specific environment variables.
+
+    Dispatches to the platform-specific event builder.
+
+    Args:
+        platform_name (PlatformName): The target platform.
+
+    Returns:
+        PullRequestEvent: The event for the current CI run.
+    """
+
+    if platform_name == PlatformName.GITHUB:
+        from review_sentinel.commands.ci.github import build_event
+    else:
+        from review_sentinel.commands.ci.gitlab import build_event
+
+    return build_event()
+
+
+def _resolve_ci_workspace(platform_name: PlatformName) -> str:
+    """
+    Resolve the workspace path from CI-specific environment variables.
+
+    Dispatches to the platform-specific workspace resolver.
+
+    Args:
+        platform_name (PlatformName): The target platform.
+
+    Returns:
+        str: Absolute path to the repository checkout.
+    """
+
+    if platform_name == PlatformName.GITHUB:
+        from review_sentinel.commands.ci.github import resolve_workspace
+    else:
+        from review_sentinel.commands.ci.gitlab import resolve_workspace
+
+    return resolve_workspace()
+
+
+def _build_ci_config() -> Config:
+    """
+    Build a CI Config from environment variables.
+
+    Reviewer model flows in via ``AGENT_MODEL`` and coding guidelines
+    via ``CODING_GUIDELINES_FILE`` through the standard env→YAML mapping
+    (see ``config/env.py``); only the provider default is forced here.
+
+    Returns:
+        Config: The resolved CI configuration.
+
+    Raises:
+        ValueError: If ``AGENT_PROVIDER`` is not a recognised provider.
+    """
+
+    return load_config(default_provider=ProviderName.ANTHROPIC)

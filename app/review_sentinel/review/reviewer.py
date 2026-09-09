@@ -1,0 +1,922 @@
+from __future__ import annotations
+
+import asyncio
+import logging
+import shutil
+import tempfile
+from dataclasses import dataclass
+from enum import StrEnum
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+from review_sentinel.agent.api.tools import SUBMIT_REVIEW_TOOL_NAME
+from review_sentinel.agent.invoke import (
+    invoke_agent,
+    prepare_conversation,
+    save_conversation,
+)
+from review_sentinel.agent.prompts import (
+    TAG_REPO_GUIDELINES,
+    resolve_guidelines,
+    wrap_tag,
+)
+from review_sentinel.agent.sandbox import sanitize_output
+from review_sentinel.agent.sub_agent import SubAgentConfig
+from review_sentinel.config import ApiAgentConfig
+from review_sentinel.llm.cost import aggregate_cost_summary
+from review_sentinel.llm.messages import ToolChoice
+from review_sentinel.llm.registry import create_provider
+from review_sentinel.models import (
+    ChangedFile,
+    ErrorType,
+    InvocationError,
+    ReviewFinding,
+)
+from review_sentinel.platforms.base import (
+    CommentReply,
+    ExistingComment,
+    PullRequestEvent,
+    PullRequestMetadata,
+)
+from review_sentinel.prompts import load_prompt
+from review_sentinel.review.diff import (
+    build_effective_summary,
+    filter_changed_files,
+    filter_findings,
+)
+from review_sentinel.review.output import (
+    build_fallback_comment,
+    parse_review_output,
+    repair_review_output,
+)
+from review_sentinel.review.prompts import (
+    build_codebase_reviewer_prompt,
+    build_fallback_review_prompt,
+    build_reviewer_prompt,
+)
+from review_sentinel.workspace.setup import create_workspace
+
+if TYPE_CHECKING:
+    from review_sentinel.agent.result import AgentResult
+    from review_sentinel.config import Config
+    from review_sentinel.conversation.base import ConversationStore
+    from review_sentinel.llm.cost import CostSummary
+    from review_sentinel.llm.messages import Message
+    from review_sentinel.llm.provider import LLMProvider
+    from review_sentinel.models import AgentReview
+    from review_sentinel.platforms.base import Platform
+    from review_sentinel.workspace.git import GitWorkspace
+
+
+class ReviewScope(StrEnum):
+    """
+    Determines what the reviewer is scoped to.
+
+    PR: standard pull-request review — fetches diff, comments, and
+        metadata from the platform; filters findings to diff lines only.
+    CODEBASE: whole-repository review with no diff. All platform API
+        calls for diff/comments/metadata are skipped; ``workspace_path``
+        is required; all findings are accepted as valid.
+    """
+
+    PR = "pr"
+    CODEBASE = "codebase"
+
+
+MAX_EXISTING_COMMENTS: int = 50
+REVIEWER_TEMP_DIR_PREFIX: str = "review_sentinel-reviewer-"
+REVIEWER_NOTES_FILENAME: str = "notes.md"
+REVIEWER_NOTES_HEADER: str = "# Review Notes\n\n"
+EXPLORE_ALLOWED_TOOLS: list[str] = ["Read", "Glob", "Grep", "Bash", "WriteNotes"]
+EXPLORE_SYSTEM_SUFFIX: str = load_prompt("explore/suffix.md")
+
+logger: logging.Logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class ReviewResult:
+    """
+    Result of executing a code review without side effects.
+
+    Attributes:
+        agent_review (AgentReview | None): Parsed review, or None if parsing
+            failed after retries.
+        valid_findings (list[ReviewFinding]): Findings on lines within the diff.
+        rejected_findings (list[ReviewFinding]): Findings on lines outside the diff.
+        effective_summary (str): Summary with rejected findings appended.
+        raw_output (str): The raw agent output text.
+        cost (CostSummary | None): Cost information from the agent invocation.
+        num_turns (int): Number of agentic turns taken by the LLM.
+        messages (tuple[Message, ...]): Full LLM conversation transcript.
+        input_prompt (str): User prompt sent to the LLM.
+        sub_agent_costs (tuple[CostSummary, ...]): Cost summaries from
+            sub-agents spawned during the review.
+        reviewer_base_system_prompt (str): Base reviewer system prompt
+            (reviewer prompt plus inline-suggestions section when enabled),
+            before guidelines concatenation.
+        explorer_system_prompt (str): Fully assembled explorer sub-agent
+            system prompt (explorer prompt plus suffix). Empty when no
+            explorer sub-agent runs.
+        coding_guidelines (str): Guidelines text resolved for the changed
+            files (after repo overrides and language-specific selection).
+        notes (str): Contents of the reviewer's notes scratchpad written via
+            the ``WriteNotes`` tool.
+        reviewer_system_prompt (str): Full system prompt delivered to the
+            reviewer agent — ``reviewer_base_system_prompt`` plus the
+            tag-wrapped ``coding_guidelines``. This is what the reviewer
+            LLM actually saw.
+        error (InvocationError | None): ``None`` on success; otherwise
+            wraps the failure classification and message.
+    """
+
+    agent_review: AgentReview | None
+    valid_findings: list[ReviewFinding]
+    rejected_findings: list[ReviewFinding]
+    effective_summary: str
+    raw_output: str
+    cost: CostSummary | None = None
+    num_turns: int = 0
+    messages: tuple[Message, ...] = ()
+    input_prompt: str = ""
+    sub_agent_costs: tuple[CostSummary, ...] = ()
+    reviewer_base_system_prompt: str = ""
+    explorer_system_prompt: str = ""
+    coding_guidelines: str = ""
+    notes: str = ""
+    reviewer_system_prompt: str = ""
+    error: InvocationError | None = None
+
+
+@dataclass(frozen=True)
+class ReviewContext:
+    """
+    Prepared workspace and PR data needed to run a review.
+
+    Attributes:
+        repo_path (Path): Path to the repository checkout.
+        deps_path (Path | None): Path to the shared deps directory, or None
+            in CI mode.
+        changed_files (list[ChangedFile]): Files changed in the PR.
+        existing_comments (list[ExistingComment]): Filtered existing PR
+            comments (excluding bot comments, capped).
+        workspace (GitWorkspace | None): The git workspace, or None in CI
+            mode (workspace_path was provided).
+    """
+
+    repo_path: Path
+    deps_path: Path | None
+    changed_files: list[ChangedFile]
+    existing_comments: list[ExistingComment]
+    metadata: PullRequestMetadata = PullRequestMetadata()
+    workspace: GitWorkspace | None = None
+
+
+async def review(
+    event: PullRequestEvent,
+    prompt: str,
+    config: Config,
+    platform: Platform,
+    bot_username: str = "",
+    workspace_path: str | None = None,
+    conversation_store: ConversationStore | None = None,
+    namespace: str = "",
+    context: str = "",
+    scope: ReviewScope = ReviewScope.PR,
+) -> ReviewResult:
+    """
+    Run the core review logic without posting results to the platform.
+
+    Resolves the branch, clones the repo, fetches the diff and existing
+    comments, runs the agent, parses the output, and filters findings.
+
+    Args:
+        event (PullRequestEvent): The parsed event that triggered the review.
+        prompt (str): The extracted prompt.
+        config (Config): Application configuration.
+        platform (Platform): The platform client with reviewer capabilities.
+        bot_username (str): Bot username to filter from existing comments.
+        workspace_path (str | None): Pre-existing workspace path (skips cloning).
+            Used in CI mode where the repo is already checked out. Required when
+            ``scope`` is ``ReviewScope.CODEBASE``.
+        conversation_store (ConversationStore | None): Conversation store for
+            conversation continuity.
+        namespace (str): Logical namespace for conversation key isolation.
+        context (str): Pre-review context to include in the user message.
+            Inserted verbatim before the review instruction. Typically
+            the output from codebase exploration sub-agents.
+        scope (ReviewScope): Whether this is a PR diff review or a
+            whole-repository codebase review. Defaults to ``ReviewScope.PR``.
+
+    Returns:
+        ReviewResult: The review result with findings and summary.
+
+    Raises:
+        RuntimeError: If workspace setup fails.
+        ValueError: If ``scope`` is ``ReviewScope.CODEBASE`` and
+            ``workspace_path`` is not provided.
+    """
+
+    review_context: ReviewContext = await _prepare_review_context(
+        event=event,
+        config=config,
+        platform=platform,
+        workspace_path=workspace_path,
+        bot_username=bot_username,
+        scope=scope,
+    )
+
+    if not review_context.changed_files and scope is ReviewScope.PR:
+        raise ValueError(
+            f"{platform.name} returned no changed files for "
+            f"{event.repo_full_name}#{event.pr_number}; "
+            "aborting review to avoid running the LLM on an empty diff",
+        )
+
+    if config.reviewer is None:
+        raise ValueError("ReviewerConfig is required but not configured")
+
+    reviewer_config = config.reviewer
+
+    if scope is ReviewScope.CODEBASE:
+        full_prompt: str = build_codebase_reviewer_prompt(
+            event=event,
+            user_prompt=prompt,
+            context=context,
+        )
+    else:
+        full_prompt = build_reviewer_prompt(
+            event=event,
+            user_prompt=prompt,
+            changed_files=review_context.changed_files,
+            existing_comments=review_context.existing_comments,
+            inline_suggestions=bool(reviewer_config.suggestions_prompt),
+            context=context,
+            metadata=review_context.metadata,
+        )
+
+    if isinstance(config.agent, ApiAgentConfig):
+        base_system_prompt: str = config.agent.reviewer.system_prompt
+    else:
+        base_system_prompt = config.agent.system_prompt
+
+    if reviewer_config.suggestions_prompt:
+        base_system_prompt = (
+            base_system_prompt + "\n\n" + reviewer_config.suggestions_prompt
+        )
+
+    file_paths: list[Path] = [
+        Path(changed.file_path) for changed in review_context.changed_files
+    ]
+
+    guidelines_repo_path: Path = (
+        review_context.workspace.repo_path
+        if review_context.workspace is not None
+        else review_context.repo_path
+    )
+    effective_guidelines: str = resolve_guidelines(
+        repo_path=guidelines_repo_path,
+        default_guidelines=config.prompts.coding_guidelines,
+        language_guidelines=config.prompts.language_guidelines,
+        file_paths=file_paths,
+    )
+
+    if effective_guidelines:
+        combined_system_prompt: str = (
+            base_system_prompt
+            + "\n\n"
+            + wrap_tag(TAG_REPO_GUIDELINES, effective_guidelines)
+        )
+    else:
+        combined_system_prompt = base_system_prompt
+
+    effective_allowed_tools: list[str]
+
+    effective_tool_choice: ToolChoice | None = None
+    sub_agent_configs: dict[str, SubAgentConfig] | None = None
+    notes_file_path: Path | None = None
+    explore_provider: LLMProvider | None = None
+    explore_system_prompt: str = ""
+    captured_notes: str = ""
+
+    if isinstance(config.agent, ApiAgentConfig):
+        agent_config: ApiAgentConfig = config.agent
+
+        effective_allowed_tools = [
+            "Read",
+            "Glob",
+            "Grep",
+            "Bash",
+            "WriteNotes",
+            SUBMIT_REVIEW_TOOL_NAME,
+        ]
+        effective_max_turns: int = agent_config.reviewer.max_turns
+
+        explore_provider = create_provider(name=agent_config.explorer.name)
+
+        explore_system_prompt = (
+            agent_config.explorer.system_prompt
+            + "\n\n"
+            + EXPLORE_SYSTEM_SUFFIX.format(agent_type="explore")
+        )
+
+        sub_agent_configs = {
+            "explore": SubAgentConfig(
+                provider=explore_provider,
+                model=agent_config.explorer.model,
+                provider_name=agent_config.explorer.name,
+                system_prompt=explore_system_prompt,
+                max_turns=agent_config.explorer.max_turns,
+                allowed_tools=EXPLORE_ALLOWED_TOOLS,
+                description=(
+                    "Fast codebase explorer. Use to answer questions about "
+                    "the codebase: finding callers of a symbol, tracing "
+                    "type hierarchies, checking test coverage across "
+                    "modules, or investigating knock-on effects of a "
+                    "change. Prefer this over running 3+ sequential "
+                    "Grep/Read calls yourself. For a single, directed "
+                    "lookup use Read/Grep directly."
+                ),
+            ),
+        }
+
+        notes_dir: Path = Path(
+            tempfile.mkdtemp(prefix=REVIEWER_TEMP_DIR_PREFIX),
+        )
+        notes_file_path = notes_dir / REVIEWER_NOTES_FILENAME
+        notes_file_path.write_text(REVIEWER_NOTES_HEADER, encoding="utf-8")
+    else:
+        effective_allowed_tools = [
+            "Read",
+            "Glob",
+            "Grep",
+            "Bash(git clone*)",
+        ]
+        effective_max_turns = config.agent.max_turns
+
+    conversation_id, prior_messages = prepare_conversation(
+        event=event,
+        agent_config=config.agent,
+        conversation_store=conversation_store,
+        namespace=namespace,
+    )
+
+    logger.info(
+        "Reviewer system prompt for %s#%d (%d chars):\n%s",
+        event.repo_full_name,
+        event.pr_number,
+        len(combined_system_prompt),
+        combined_system_prompt,
+    )
+    logger.info(
+        "Reviewer user prompt for %s#%d (%d chars):\n%s",
+        event.repo_full_name,
+        event.pr_number,
+        len(full_prompt),
+        full_prompt,
+    )
+
+    try:
+        result: AgentResult = await invoke_agent(
+            prompt=full_prompt,
+            cwd=review_context.repo_path,
+            system_prompt=combined_system_prompt,
+            allowed_tools=effective_allowed_tools,
+            agent_config=config.agent,
+            conversation_id=conversation_id,
+            prior_messages=prior_messages,
+            max_turns=effective_max_turns,
+            tool_choice=effective_tool_choice,
+            notes_file_path=notes_file_path,
+            sub_agent_configs=sub_agent_configs,
+        )
+
+        if result.max_turns_reached:
+            logger.warning(
+                "Reviewer exhausted turns for %s#%d, "
+                "falling back to notes-based review",
+                event.repo_full_name,
+                event.pr_number,
+            )
+
+            notes_content: str = ""
+
+            if notes_file_path is not None and notes_file_path.exists():
+                notes_content = notes_file_path.read_text(encoding="utf-8")
+
+            fallback_prompt: str = build_fallback_review_prompt(
+                notes=notes_content,
+                original_prompt=full_prompt,
+            )
+
+            result = await invoke_agent(
+                prompt=fallback_prompt,
+                cwd=review_context.repo_path,
+                system_prompt=combined_system_prompt,
+                allowed_tools=[SUBMIT_REVIEW_TOOL_NAME],
+                agent_config=config.agent,
+                max_turns=1,
+                tool_choice=ToolChoice.REQUIRED,
+            )
+    finally:
+        if explore_provider is not None:
+            await explore_provider.close()
+
+        if notes_file_path is not None:
+            if notes_file_path.exists():
+                try:
+                    captured_notes = notes_file_path.read_text(encoding="utf-8")
+                except OSError:
+                    captured_notes = ""
+
+            shutil.rmtree(notes_file_path.parent, ignore_errors=True)
+
+    if not config.dry_run:
+        save_conversation(
+            event=event,
+            result=result,
+            agent_config=config.agent,
+            conversation_store=conversation_store,
+            namespace=namespace,
+        )
+
+    review_result: AgentReview | None = parse_review_output(output=result.output)
+
+    if review_result is None:
+        logger.warning(
+            "Reviewer JSON parse failed for %s#%d, attempting repair",
+            event.repo_full_name,
+            event.pr_number,
+        )
+
+        review_result = await repair_review_output(
+            broken_output=result.output,
+            config=config,
+            cwd=review_context.repo_path,
+        )
+
+    if review_result is None:
+        logger.warning(
+            "Reviewer JSON repair failed for %s#%d, falling back to plain comment",
+            event.repo_full_name,
+            event.pr_number,
+        )
+
+        fallback_comment: str = build_fallback_comment(raw_output=result.output)
+        error: InvocationError = result.error or InvocationError(
+            type=ErrorType.PARSE_ERROR,
+            message=(
+                "Reviewer output could not be parsed as structured "
+                "JSON, and JSON repair did not recover a valid review."
+            ),
+        )
+
+        return ReviewResult(
+            agent_review=None,
+            valid_findings=[],
+            rejected_findings=[],
+            effective_summary="",
+            raw_output=fallback_comment,
+            cost=result.cost,
+            num_turns=result.num_turns,
+            messages=result.messages,
+            input_prompt=full_prompt,
+            sub_agent_costs=result.sub_agent_costs,
+            reviewer_base_system_prompt=base_system_prompt,
+            explorer_system_prompt=explore_system_prompt,
+            coding_guidelines=effective_guidelines,
+            notes=captured_notes,
+            reviewer_system_prompt=combined_system_prompt,
+            error=error,
+        )
+
+    if scope is ReviewScope.CODEBASE:
+        valid_findings: list[ReviewFinding] = list(review_result.findings)
+        rejected_findings: list[ReviewFinding] = []
+    else:
+        valid_findings, rejected_findings = filter_findings(
+            findings=review_result.findings,
+            changed_files=review_context.changed_files,
+        )
+
+    if rejected_findings:
+        logger.warning(
+            "Filtered %d findings outside the diff for %s#%d",
+            len(rejected_findings),
+            event.repo_full_name,
+            event.pr_number,
+        )
+
+    effective_summary: str = build_effective_summary(
+        summary=review_result.summary,
+        rejected_findings=rejected_findings,
+    )
+
+    _log_review_costs(
+        event=event,
+        reviewer_cost=result.cost,
+        sub_agent_costs=result.sub_agent_costs,
+        findings_count=len(review_result.findings),
+        num_turns=result.num_turns,
+        duration_ms=result.duration_ms,
+    )
+
+    return ReviewResult(
+        agent_review=review_result,
+        valid_findings=valid_findings,
+        rejected_findings=rejected_findings,
+        effective_summary=effective_summary,
+        raw_output=result.output,
+        cost=result.cost,
+        num_turns=result.num_turns,
+        messages=result.messages,
+        input_prompt=full_prompt,
+        sub_agent_costs=result.sub_agent_costs,
+        reviewer_base_system_prompt=base_system_prompt,
+        explorer_system_prompt=explore_system_prompt,
+        coding_guidelines=effective_guidelines,
+        notes=captured_notes,
+        reviewer_system_prompt=combined_system_prompt,
+    )
+
+
+async def post_review_result(
+    event: PullRequestEvent,
+    result: ReviewResult,
+    platform: Platform,
+) -> None:
+    """
+    Post a ReviewResult to the platform.
+
+    Handles three cases: raw output fallback (when JSON parsing failed),
+    findings as a native review, or a summary-only reply.
+
+    Args:
+        event (PullRequestEvent): The event to post results against.
+        result (ReviewResult): The review result to post.
+        platform (Platform): The platform client.
+    """
+
+    if result.agent_review is None:
+        await platform.post_reply(
+            event=event,
+            reply=CommentReply(body=sanitize_output(result.raw_output)),
+        )
+
+        return
+
+    sanitized_findings: list[ReviewFinding] = [
+        ReviewFinding(
+            file_path=finding.file_path,
+            line=finding.line,
+            body=sanitize_output(finding.body),
+            side=finding.side,
+            suggestion=finding.suggestion,
+            start_line=finding.start_line,
+        )
+        for finding in result.valid_findings
+    ]
+    sanitized_summary: str = sanitize_output(result.effective_summary)
+
+    if sanitized_findings:
+        await platform.submit_review(
+            repo_full_name=event.repo_full_name,
+            pr_number=event.pr_number,
+            findings=sanitized_findings,
+            summary=sanitized_summary,
+            event=event,
+        )
+    else:
+        await platform.post_reply(
+            event=event,
+            reply=CommentReply(body=sanitized_summary),
+        )
+
+
+async def run_and_post_review(
+    event: PullRequestEvent,
+    prompt: str,
+    config: Config,
+    platform: Platform,
+    workspace_path: str | None = None,
+    conversation_store: ConversationStore | None = None,
+    namespace: str = "",
+    context: str = "",
+    scope: ReviewScope = ReviewScope.PR,
+) -> ReviewResult:
+    """
+    Run a review and post the results to the platform.
+
+    Combines ``review()`` and ``post_review_result()`` into a single call.
+    Callers are responsible for their own error handling (e.g. wrapping
+    with ``handle_agent_errors`` or try/except).
+
+    Args:
+        event (PullRequestEvent): The parsed event that triggered the review.
+        prompt (str): The extracted prompt.
+        config (Config): Application configuration.
+        platform (Platform): The platform client with reviewer capabilities.
+        workspace_path (str | None): Pre-existing workspace path (skips cloning).
+            Required when ``scope`` is ``ReviewScope.CODEBASE``.
+        conversation_store (ConversationStore | None): Conversation store for
+            conversation continuity.
+        namespace (str): Logical namespace for conversation key isolation.
+        context (str): Pre-review context to include in the user message.
+        scope (ReviewScope): Whether this is a PR diff review or a
+            whole-repository codebase review. Defaults to ``ReviewScope.PR``.
+
+    Returns:
+        ReviewResult: The review result with findings and summary.
+    """
+
+    if config.reviewer is None:
+        raise ValueError("ReviewerConfig is required but not configured")
+
+    bot_username: str = config.reviewer.bot_username
+
+    review_result: ReviewResult = await review(
+        event=event,
+        prompt=prompt,
+        config=config,
+        platform=platform,
+        bot_username=bot_username,
+        workspace_path=workspace_path,
+        conversation_store=conversation_store,
+        namespace=namespace,
+        context=context,
+        scope=scope,
+    )
+
+    if not config.dry_run:
+        await post_review_result(
+            event=event,
+            result=review_result,
+            platform=platform,
+        )
+
+    return review_result
+
+
+async def _prepare_review_context(
+    event: PullRequestEvent,
+    config: Config,
+    platform: Platform,
+    workspace_path: str | None,
+    bot_username: str,
+    scope: ReviewScope = ReviewScope.PR,
+) -> ReviewContext:
+    """
+    Set up workspace and fetch PR data for a review.
+
+    Handles both CI mode (pre-existing workspace) and clone mode. Fetches
+    the diff and existing comments in parallel with workspace setup.
+    For ``ReviewScope.CODEBASE``, all platform API calls are skipped and
+    the pre-cloned workspace is used directly.
+
+    Args:
+        event (PullRequestEvent): The parsed event that triggered the review.
+        config (Config): Application configuration.
+        platform (Platform): The platform client.
+        workspace_path (str | None): Pre-existing workspace path (skips cloning).
+            Required when ``scope`` is ``ReviewScope.CODEBASE``.
+        bot_username (str): Bot username to filter from existing comments.
+        scope (ReviewScope): Review scope. Defaults to ``ReviewScope.PR``.
+
+    Returns:
+        ReviewContext: The prepared workspace and PR data.
+    """
+
+    if scope is ReviewScope.CODEBASE:
+        if workspace_path is None:
+            raise ValueError(
+                "workspace_path is required for ReviewScope.CODEBASE",
+            )
+
+        return ReviewContext(
+            repo_path=Path(workspace_path),
+            deps_path=None,
+            changed_files=[],
+            existing_comments=[],
+            metadata=PullRequestMetadata(),
+        )
+
+    if workspace_path is not None:
+        repo_path: Path = Path(workspace_path)
+
+        changed_files_result: list[ChangedFile]
+        all_comments_result: list[ExistingComment]
+        metadata_result: PullRequestMetadata
+
+        (
+            changed_files_result,
+            all_comments_result,
+            metadata_result,
+        ) = await asyncio.gather(
+            platform.fetch_pr_diff(
+                repo_full_name=event.repo_full_name,
+                pr_number=event.pr_number,
+            ),
+            _fetch_pr_comments_or_empty(platform, event, config),
+            platform.fetch_pr_metadata(
+                repo_full_name=event.repo_full_name,
+                pr_number=event.pr_number,
+            ),
+        )
+
+        existing_comments: list[ExistingComment] = [
+            existing
+            for existing in all_comments_result
+            if not bot_username or existing.author != bot_username
+        ][-MAX_EXISTING_COMMENTS:]
+
+        return ReviewContext(
+            repo_path=repo_path,
+            deps_path=None,
+            changed_files=_apply_ignore_patterns(
+                changed_files_result,
+                config=config,
+                event=event,
+            ),
+            existing_comments=existing_comments,
+            metadata=metadata_result,
+        )
+
+    workspace: GitWorkspace = create_workspace(
+        event=event,
+        config=config,
+    )
+
+    results: tuple[
+        list[ChangedFile], list[ExistingComment], PullRequestMetadata, None
+    ] = await asyncio.gather(
+        platform.fetch_pr_diff(
+            repo_full_name=event.repo_full_name,
+            pr_number=event.pr_number,
+        ),
+        _fetch_pr_comments_or_empty(platform, event, config),
+        platform.fetch_pr_metadata(
+            repo_full_name=event.repo_full_name,
+            pr_number=event.pr_number,
+        ),
+        workspace.ensure_ready(),
+    )
+    workspace.maybe_create_deps_dir()
+
+    all_comments: list[ExistingComment] = results[1]
+
+    existing_comments = [
+        existing
+        for existing in all_comments
+        if not bot_username or existing.author != bot_username
+    ][-MAX_EXISTING_COMMENTS:]
+
+    return ReviewContext(
+        repo_path=workspace.repo_path,
+        deps_path=workspace.deps_path,
+        changed_files=_apply_ignore_patterns(
+            results[0],
+            config=config,
+            event=event,
+        ),
+        existing_comments=existing_comments,
+        metadata=results[2],
+        workspace=workspace,
+    )
+
+
+def _apply_ignore_patterns(
+    changed_files: list[ChangedFile],
+    *,
+    config: Config,
+    event: PullRequestEvent,
+) -> list[ChangedFile]:
+    """
+    Apply org-configured ignore patterns to the diff before review.
+
+    Reads ``config.reviewer.ignore_patterns`` and excludes any matching
+    file paths. When at least one file is excluded, logs a single
+    WARNING line that mirrors ``filter_findings`` so observability is
+    consistent across diff filtering and finding filtering.
+
+    Args:
+        changed_files (list[ChangedFile]): Files in the PR diff.
+        config (Config): Application configuration.
+        event (PullRequestEvent): The event being reviewed; used only
+            for the log line.
+
+    Returns:
+        list[ChangedFile]: The retained files. Identical to ``changed_files``
+            when no patterns are configured.
+    """
+
+    patterns: frozenset[str] = (
+        config.reviewer.ignore_patterns if config.reviewer else frozenset()
+    )
+
+    kept, removed = filter_changed_files(changed_files, patterns)
+
+    if removed:
+        logger.warning(
+            "Excluded %d of %d files by ignore_patterns for %s#%d",
+            len(removed),
+            len(changed_files),
+            event.repo_full_name,
+            event.pr_number,
+        )
+
+    return kept
+
+
+async def _fetch_pr_comments_or_empty(
+    platform: Platform,
+    event: PullRequestEvent,
+    config: Config,
+) -> list[ExistingComment]:
+    """
+    Fetch existing PR comments unless ``ignore_existing_comments`` is set.
+
+    Returning an empty list lets a review run against a PR whose prior
+    comments (including previous bot reviews) would otherwise bias the
+    prompt — useful for iterating on prompt/model changes against a PR
+    that has already been reviewed.
+
+    Args:
+        platform (Platform): The platform client.
+        event (PullRequestEvent): The event carrying the PR coordinates.
+        config (Config): Application configuration.
+
+    Returns:
+        list[ExistingComment]: Fetched comments, or ``[]`` when
+            ``config.ignore_existing_comments`` is ``True``.
+    """
+
+    if config.ignore_existing_comments:
+        return []
+
+    return await platform.fetch_pr_comments(
+        repo_full_name=event.repo_full_name,
+        pr_number=event.pr_number,
+    )
+
+
+def _log_review_costs(
+    event: PullRequestEvent,
+    reviewer_cost: CostSummary | None,
+    sub_agent_costs: tuple[CostSummary, ...],
+    findings_count: int,
+    num_turns: int,
+    duration_ms: int,
+) -> None:
+    """
+    Log the reviewer step cost and the aggregated total.
+
+    Args:
+        event (PullRequestEvent): The PR event for log context.
+        reviewer_cost (CostSummary | None): Cost from the reviewer step.
+        sub_agent_costs (tuple[CostSummary, ...]): Cost summaries from
+            sub-agents spawned via the Agent tool.
+        findings_count (int): Number of findings produced.
+        num_turns (int): Number of reviewer turns.
+        duration_ms (int): Wall-clock duration of the reviewer step.
+    """
+
+    pr_ref: str = f"{event.repo_full_name}#{event.pr_number}"
+
+    reviewer_tokens_in: int = 0
+    reviewer_tokens_out: int = 0
+    reviewer_cost_usd: float = 0.0
+
+    if reviewer_cost is not None:
+        reviewer_tokens_in = reviewer_cost.total_input_tokens
+        reviewer_tokens_out = reviewer_cost.total_output_tokens
+        reviewer_cost_usd = reviewer_cost.total_cost_usd or 0.0
+
+    logger.info(
+        "Step cost [reviewer] for %s: tokens_in=%d, tokens_out=%d, "
+        "api_calls=%d, cost=$%.4f",
+        pr_ref,
+        reviewer_tokens_in,
+        reviewer_tokens_out,
+        reviewer_cost.num_api_calls if reviewer_cost else 0,
+        reviewer_cost_usd,
+    )
+
+    aggregated: CostSummary | None = aggregate_cost_summary(
+        reviewer=reviewer_cost,
+        sub_agents=sub_agent_costs,
+    )
+
+    total_tokens_in: int = aggregated.total_input_tokens if aggregated else 0
+    total_tokens_out: int = aggregated.total_output_tokens if aggregated else 0
+    total_cost: float = aggregated.total_cost_usd or 0.0 if aggregated else 0.0
+
+    logger.info(
+        "Review complete for %s (findings=%d, turns=%d, duration=%dms, "
+        "total_tokens_in=%d, total_tokens_out=%d, total_cost=$%.4f)",
+        pr_ref,
+        findings_count,
+        num_turns,
+        duration_ms,
+        total_tokens_in,
+        total_tokens_out,
+        total_cost,
+    )

@@ -1,0 +1,475 @@
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from enum import StrEnum
+from typing import TYPE_CHECKING, Protocol
+
+if TYPE_CHECKING:
+    from review_sentinel.models import ChangedFile, EventType, ReviewFinding
+
+
+class PlatformName(StrEnum):
+    """
+    Supported source-control platform identifiers.
+    """
+
+    GITHUB = "github"
+    GITLAB = "gitlab"
+
+
+class PullRequestState(StrEnum):
+    """
+    Normalized lifecycle state of a PR/MR across platforms.
+
+    GitHub exposes ``state`` (``"open"``/``"closed"``) plus a separate
+    ``merged`` boolean; GitLab exposes a single ``state`` enum
+    (``"opened"``/``"closed"``/``"merged"``/``"locked"``). This enum
+    collapses both shapes into a small alphabet that callers can act on
+    without knowing which platform they're talking to.
+
+    Values:
+        OPEN: PR/MR is open and reviewable.
+        CLOSED: PR/MR was closed without merging (rare; also covers
+            GitLab's ``locked`` since both leave nothing to review).
+        MERGED: PR/MR was merged into the base branch.
+        UNKNOWN: State could not be determined (API failure, unmappable
+            value, etc.). Callers should typically fall through to their
+            existing behavior rather than blocking on this signal.
+    """
+
+    OPEN = "open"
+    CLOSED = "closed"
+    MERGED = "merged"
+    UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True)
+class PullRequestEvent:
+    """
+    Base normalized event from either GitHub or GitLab.
+
+    Contains the shared identity fields common to both comment and
+    lifecycle events. Use ``CommentEvent`` or ``LifecycleEvent`` for
+    the full event shape.
+
+    Attributes:
+        platform (PlatformName): Source platform identifier.
+        repo_full_name (str): Full repository name (e.g. ``owner/repo``).
+        pr_number (int): Pull request or merge request number.
+        pr_branch (str): The head branch name of the PR/MR.
+        event_type (EventType): The event type that produced this event.
+        clone_url (str): Authenticated clone URL for the repository.
+            Defaults to empty; populated after ``authenticate()`` by the
+            webhook handler or CLI.
+        pr_title (str): Pull request or merge request title. Defaults to
+            empty; populated by webhook parsers.
+        base_branch (str): The target/base branch of the PR/MR (e.g.
+            ``main``). Defaults to empty; populated by webhook parsers.
+    """
+
+    platform: PlatformName
+    repo_full_name: str
+    pr_number: int
+    pr_branch: str
+    event_type: EventType
+    clone_url: str = ""
+    pr_title: str = ""
+    base_branch: str = ""
+
+
+@dataclass(frozen=True)
+class PullRequestMetadata:
+    """
+    Metadata about a pull request fetched from the platform API.
+
+    Contains the PR description and commit messages that provide
+    additional context for the reviewer agent.
+
+    Attributes:
+        title (str): Pull request or merge request title.
+        description (str): Pull request or merge request description body.
+        commit_messages (tuple[str, ...]): First-line commit messages in
+            chronological order.
+    """
+
+    title: str = ""
+    description: str = ""
+    commit_messages: tuple[str, ...] = field(default_factory=tuple)
+
+
+@dataclass(frozen=True)
+class CommentEvent(PullRequestEvent):
+    """
+    A comment event triggered by an @mention on a PR/MR.
+
+    Attributes:
+        comment_id (int): Unique comment identifier on the platform.
+        author_username (str): Username of the comment author.
+        body (str): The raw comment body text.
+        diff_hunk (str): The diff hunk context around the comment.
+        file_path (str): File path the comment is attached to.
+        discussion_id (str): GitLab discussion ID for threaded replies.
+        mention_prompt (str | None): The user instruction extracted from
+            the ``@bot`` mention. ``None`` until mention parsing runs.
+    """
+
+    comment_id: int = 0
+    author_username: str = ""
+    body: str = ""
+    diff_hunk: str = ""
+    file_path: str = ""
+    discussion_id: str = ""
+    mention_prompt: str | None = None
+
+
+@dataclass(frozen=True)
+class LifecycleEvent(PullRequestEvent):
+    """
+    A lifecycle event triggered by PR state changes (opened, push, reopened).
+
+    Attributes:
+        pr_author (str): Pull request author username.
+    """
+
+    pr_author: str = ""
+
+
+@dataclass(frozen=True)
+class CommentReply:
+    """
+    A reply to post back to the platform.
+
+    Attributes:
+        body (str): The reply text in markdown.
+        commit_sha (str): Optional commit SHA if code was pushed.
+    """
+
+    body: str
+    commit_sha: str = ""
+
+
+@dataclass(frozen=True)
+class ExistingComment:
+    """
+    An existing comment on a PR/MR, used as context for the reviewer bot.
+
+    Attributes:
+        author (str): Username of the comment author.
+        body (str): The comment body text.
+        file_path (str): File path the comment is attached to, or empty for
+            top-level comments.
+        line (int): Line number the comment is attached to, or 0 for top-level
+            comments.
+        is_resolved (bool): Whether the discussion thread is resolved.
+        created_at (str): ISO 8601 timestamp of comment creation.
+    """
+
+    author: str
+    body: str
+    file_path: str = ""
+    line: int = 0
+    is_resolved: bool = False
+    created_at: str = ""
+
+
+class PlatformAuth(ABC):
+    """
+    Abstract base for platform authentication strategies.
+
+    Both GitHub and GitLab auth providers subclass this ABC,
+    providing a unified interface for token access across platforms.
+    """
+
+    @abstractmethod
+    async def ensure_auth(self, account_id: int = 0) -> None:
+        """
+        Ensure valid authentication for the given account.
+
+        No-op for static token strategies. Dynamic implementations
+        refresh or load tokens as needed.
+
+        Args:
+            account_id (int): Platform-specific account identifier.
+        """
+
+    @abstractmethod
+    def get_api_token(self, account_id: int = 0) -> str:
+        """
+        Return the current API token for the given account.
+
+        PAT implementations ignore the account ID and return a static token.
+        App implementations look up the per-account cache.
+
+        Args:
+            account_id (int): Platform-specific account identifier.
+
+        Returns:
+            str: A valid API token.
+        """
+
+
+class Platform(Protocol):
+    """
+    Protocol for platform-specific webhook handling and API calls.
+    """
+
+    @property
+    def name(self) -> str:
+        """
+        Unique platform identifier.
+
+        Returns:
+            str: The platform name (e.g. ``"github"``, ``"gitlab"``).
+        """
+
+        ...
+
+    def verify_webhook(self, headers: Mapping[str, str], body: bytes) -> bool:
+        """
+        Verify the webhook signature or token.
+
+        Args:
+            headers (Mapping[str, str]): The HTTP request headers.
+            body (bytes): The raw request body.
+
+        Returns:
+            bool: True if verification succeeds.
+        """
+
+        ...
+
+    def parse_event(
+        self,
+        headers: Mapping[str, str],
+        body: bytes,
+    ) -> CommentEvent | LifecycleEvent | None:
+        """
+        Parse a webhook payload into a CommentEvent or LifecycleEvent.
+
+        Returns None if the event type is not relevant.
+
+        Args:
+            headers (Mapping[str, str]): The HTTP request headers.
+            body (bytes): The raw request body.
+
+        Returns:
+            CommentEvent | LifecycleEvent | None: The parsed event,
+                or None if irrelevant.
+        """
+
+        ...
+
+    async def post_reply(
+        self,
+        event: PullRequestEvent,
+        reply: CommentReply,
+    ) -> None:
+        """
+        Post a reply to a review comment on the platform.
+
+        Args:
+            event (PullRequestEvent): The original event to reply to.
+            reply (CommentReply): The reply content.
+        """
+
+        ...
+
+    async def post_reaction(
+        self,
+        event: CommentEvent,
+        reaction: str,
+    ) -> None:
+        """
+        Add a reaction/emoji to a comment on the platform.
+
+        Args:
+            event (CommentEvent): The comment event to react to.
+            reaction (str): The reaction name (e.g. ``eyes``, ``+1``).
+        """
+
+        ...
+
+    async def post_pr_reaction(
+        self,
+        repo_full_name: str,
+        pr_number: int,
+        reaction: str,
+    ) -> None:
+        """
+        Add a reaction/emoji to a PR or MR itself.
+
+        Args:
+            repo_full_name (str): Full repository name (e.g. ``owner/repo``).
+            pr_number (int): Pull request or merge request number.
+            reaction (str): The reaction name (e.g. ``eyes``, ``+1``).
+        """
+
+        ...
+
+    async def fetch_pr_branch(self, repo_full_name: str, pr_number: int) -> str:
+        """
+        Resolve the head branch name when the webhook payload lacks it.
+
+        Platforms where the branch is always present in the webhook should
+        return an empty string.
+
+        Args:
+            repo_full_name (str): Full repository name (e.g. ``owner/repo``).
+            pr_number (int): Pull request or merge request number.
+
+        Returns:
+            str: The head branch name, or empty string if unavailable.
+        """
+
+        ...
+
+    async def fetch_pr_state(
+        self,
+        repo_full_name: str,
+        pr_number: int,
+    ) -> PullRequestState:
+        """
+        Fetch the lifecycle state of a PR/MR.
+
+        Used by callers that need to short-circuit on PRs that aren't
+        worth reviewing — typically merged or closed ones, whose head
+        branch is often gone (auto-delete on merge) and would otherwise
+        cause a downstream clone to fail.
+
+        Returns ``PullRequestState.UNKNOWN`` on API failure or for any
+        platform-specific state value that doesn't map cleanly so
+        callers can fall through to their existing behavior rather than
+        blocking on a flaky check.
+
+        Args:
+            repo_full_name (str): Full repository name (e.g. ``owner/repo``).
+            pr_number (int): Pull request or merge request number.
+
+        Returns:
+            PullRequestState: Normalized state enum.
+        """
+
+        ...
+
+    async def authenticate(
+        self,
+        *,
+        webhook_body: bytes | None = None,
+        account_id: int | None = None,
+    ) -> None:
+        """
+        Ensure the platform has valid authentication.
+
+        In webhook mode, pass the raw body so the platform can extract
+        account context (e.g. GitHub installation ID). In CLI/CI/job
+        mode, call with no arguments. When ``account_id`` is provided,
+        it overrides any account context derived from ``webhook_body``.
+
+        Args:
+            webhook_body (bytes | None): The raw webhook request body,
+                or None for non-webhook modes.
+            account_id (int | None): Optional explicit account context
+                (e.g. GitHub installation ID). Takes precedence over
+                ``webhook_body`` when both are supplied.
+        """
+
+        ...
+
+    def build_clone_url(
+        self,
+        repo_full_name: str,
+    ) -> str:
+        """
+        Build an authenticated clone URL for a repository.
+
+        Must be called after ``authenticate()`` so that a valid token is
+        available for App-based auth modes.
+
+        Args:
+            repo_full_name (str): Full repository name (e.g. ``owner/repo``).
+
+        Returns:
+            str: The authenticated HTTPS clone URL.
+        """
+
+        ...
+
+    async def fetch_pr_comments(
+        self,
+        repo_full_name: str,
+        pr_number: int,
+    ) -> list[ExistingComment]:
+        """
+        Fetch existing comments on a PR/MR for reviewer context.
+
+        Args:
+            repo_full_name (str): Full repository name (e.g. ``owner/repo``).
+            pr_number (int): Pull request or merge request number.
+
+        Returns:
+            list[ExistingComment]: Comments sorted by ``created_at`` ascending.
+        """
+
+        ...
+
+    async def fetch_pr_diff(
+        self,
+        repo_full_name: str,
+        pr_number: int,
+    ) -> list[ChangedFile]:
+        """
+        Fetch the list of changed files with their patches for a PR/MR.
+
+        Args:
+            repo_full_name (str): Full repository name (e.g. ``owner/repo``).
+            pr_number (int): Pull request or merge request number.
+
+        Returns:
+            list[ChangedFile]: The changed files with unified diff patches.
+        """
+
+        ...
+
+    async def fetch_pr_metadata(
+        self,
+        repo_full_name: str,
+        pr_number: int,
+    ) -> PullRequestMetadata:
+        """
+        Fetch PR/MR title, description, and commit messages.
+
+        Returns a default empty ``PullRequestMetadata`` on API failure
+        so that reviews can proceed without metadata.
+
+        Args:
+            repo_full_name (str): Full repository name (e.g. ``owner/repo``).
+            pr_number (int): Pull request or merge request number.
+
+        Returns:
+            PullRequestMetadata: The fetched metadata.
+        """
+
+        ...
+
+    async def submit_review(
+        self,
+        repo_full_name: str,
+        pr_number: int,
+        findings: list[ReviewFinding],
+        summary: str,
+        event: PullRequestEvent,
+    ) -> None:
+        """
+        Submit a native code review with inline comments.
+
+        Args:
+            repo_full_name (str): Full repository name.
+            pr_number (int): Pull request or merge request number.
+            findings (list[ReviewFinding]): Inline review comments.
+            summary (str): High-level review summary.
+            event (PullRequestEvent): The original event that triggered the review.
+        """
+
+        ...

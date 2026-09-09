@@ -1,0 +1,17 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: review-sentinel-server
+  namespace: review-sentinel
+spec:
+  template:
+    spec:
+      containers:
+        - name: server
+          env:
+            - name: CONFIG_PATH
+              value: "/etc/review-sentinel/config.yaml"
+            - name: ALLOWED_USERS
+              value: "test-user"
+            - name: REVIEWER_BOT_USERNAME
+              value: "review_sentinel-bot"

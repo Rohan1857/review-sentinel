@@ -1,0 +1,182 @@
+from __future__ import annotations
+
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from review_sentinel.config import Config
+    from review_sentinel.workspace.git import GitWorkspace
+
+REVIEW_SENTINEL_CONFIG_DIR: str = ".review_sentinel"
+REPO_GUIDELINES_PATH: Path = Path(REVIEW_SENTINEL_CONFIG_DIR) / "guidelines.md"
+EXTENSION_TO_LANGUAGE: dict[str, str] = {
+    ".py": "python",
+    ".pyi": "python",
+}
+
+TAG_UNTRUSTED_DIFF: str = "untrusted-diff"
+TAG_UNTRUSTED_COMMENT: str = "untrusted-comment"
+TAG_UNTRUSTED_REQUEST: str = "untrusted-request"
+TAG_UNTRUSTED_HUNK: str = "untrusted-hunk"
+TAG_UNTRUSTED_DESCRIPTION: str = "untrusted-description"
+TAG_UNTRUSTED_COMMIT_MESSAGES: str = "untrusted-commit-messages"
+TAG_FILE_PATH: str = "file-path"
+TAG_BRANCH_NAME: str = "branch-name"
+TAG_REPO_GUIDELINES: str = "repo-guidelines"
+
+
+def wrap_tag(tag: str, content: str) -> str:
+    """
+    Wrap content in XML boundary tags for prompt injection defense.
+
+    Args:
+        tag (str): The XML tag name.
+        content (str): The content to wrap.
+
+    Returns:
+        str: The content wrapped in opening and closing XML tags.
+    """
+
+    safe_content: str = content.replace(f"</{tag}>", f"<\\/{tag}>")
+
+    return f"<{tag}>\n{safe_content}\n</{tag}>"
+
+
+def resolve_guidelines(
+    repo_path: Path,
+    default_guidelines: str,
+    language_guidelines: dict[str, str],
+    file_paths: list[Path],
+) -> str:
+    """
+    Compose effective guidelines from general and language-specific sources.
+
+    Resolution order for general guidelines: ``.review_sentinel/guidelines.md`` in the
+    repository overrides the default. For each detected language: ``.review_sentinel/{lang}.md``
+    overrides the built-in ``prompts/languages/{lang}.md``.
+
+    Args:
+        repo_path (Path): Absolute path to the repository root.
+        default_guidelines (str): Fallback general guidelines from config.
+        language_guidelines (dict[str, str]): Built-in language guidelines
+            keyed by language name.
+        file_paths (list[Path]): File paths used to detect relevant languages.
+
+    Returns:
+        str: The composed guidelines string.
+    """
+
+    guidelines: list[str] = []
+    repo_guidelines: str = _load_repo_guidelines(repo_path) or default_guidelines
+
+    if repo_guidelines:
+        guidelines.append(repo_guidelines)
+
+    for language in _detect_languages(file_paths):
+        repo_lang_guidelines: str = _load_repo_language_guidelines(
+            repo_path, language
+        ) or language_guidelines.get(language, "")
+
+        if repo_lang_guidelines:
+            guidelines.append(repo_lang_guidelines)
+
+    return "\n\n".join(guidelines)
+
+
+def resolve_system_prompt(
+    workspace: GitWorkspace,
+    config: Config,
+    bot_system_prompt: str,
+    file_paths: list[Path],
+) -> str:
+    """
+    Resolve guidelines and compose the full system prompt.
+
+    Args:
+        workspace (GitWorkspace): The workspace with the cloned repo.
+        config (Config): Application configuration.
+        bot_system_prompt (str): The bot-specific base system prompt.
+        file_paths (list[Path]): File paths used to detect relevant languages.
+
+    Returns:
+        str: The combined system prompt with guidelines.
+    """
+
+    guidelines: str = resolve_guidelines(
+        repo_path=workspace.repo_path,
+        default_guidelines=config.prompts.coding_guidelines,
+        language_guidelines=config.prompts.language_guidelines,
+        file_paths=file_paths,
+    )
+
+    if guidelines:
+        return bot_system_prompt + "\n\n" + wrap_tag(TAG_REPO_GUIDELINES, guidelines)
+
+    return bot_system_prompt
+
+
+def _load_repo_guidelines(repo_path: Path) -> str:
+    """
+    Load repo-level coding guidelines from the repository root.
+
+    Looks for a `.review_sentinel/guidelines.md` file in the given repo path.
+    Returns its contents if found, otherwise returns an empty string.
+
+    Args:
+        repo_path (Path): Absolute path to the repository root.
+
+    Returns:
+        str: The guidelines content, or empty string if not found.
+    """
+
+    full_path: Path = repo_path / REPO_GUIDELINES_PATH
+
+    if not full_path.is_file():
+        return ""
+
+    return full_path.read_text(encoding="utf-8").strip()
+
+
+def _detect_languages(file_paths: list[Path]) -> set[str]:
+    """
+    Detect programming languages from file paths using their extensions.
+
+    Args:
+        file_paths (list[Path]): File paths to inspect.
+
+    Returns:
+        set[str]: Detected language names.
+    """
+
+    languages: set[str] = set()
+
+    for file_path in file_paths:
+        extension: str = file_path.suffix.lower()
+        language: str | None = EXTENSION_TO_LANGUAGE.get(extension)
+
+        if language:
+            languages.add(language)
+
+    return languages
+
+
+def _load_repo_language_guidelines(repo_path: Path, language: str) -> str:
+    """
+    Load a language-specific guideline file from the repository's ``.review_sentinel/`` dir.
+
+    Looks for ``.review_sentinel/{language}.md`` in the given repo path.
+
+    Args:
+        repo_path (Path): Absolute path to the repository root.
+        language (str): Language name (e.g. ``python``).
+
+    Returns:
+        str: The guideline content, or empty string if not found.
+    """
+
+    full_path: Path = repo_path / REVIEW_SENTINEL_CONFIG_DIR / "languages" / f"{language}.md"
+
+    if not full_path.is_file():
+        return ""
+
+    return full_path.read_text(encoding="utf-8").strip()

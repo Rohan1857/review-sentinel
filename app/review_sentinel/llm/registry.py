@@ -1,0 +1,110 @@
+from __future__ import annotations
+
+from typing import Any
+
+from environs import Env
+
+from review_sentinel.config import AgentRoleConfig
+from review_sentinel.llm.provider import LLMProvider
+from review_sentinel.models import ProviderName
+
+_env: Env = Env()
+
+PROVIDERS: dict[ProviderName, AgentRoleConfig] = {
+    ProviderName.ANTHROPIC: AgentRoleConfig(
+        name=ProviderName.ANTHROPIC,
+        model="claude-sonnet-4-20250514",
+    ),
+    ProviderName.OPENAI: AgentRoleConfig(
+        name=ProviderName.OPENAI,
+        model="gpt-4.1",
+    ),
+    ProviderName.GOOGLE: AgentRoleConfig(
+        name=ProviderName.GOOGLE,
+        model="gemini-2.5-flash",
+    ),
+    ProviderName.DEEPSEEK: AgentRoleConfig(
+        name=ProviderName.DEEPSEEK,
+        model="deepseek-chat",
+        base_url="https://api.deepseek.com",
+    ),
+    ProviderName.GROQ: AgentRoleConfig(
+        name=ProviderName.GROQ,
+        model="llama-3.3-70b-versatile",
+        base_url="https://api.groq.com/openai/v1",
+    ),
+    ProviderName.TOGETHER: AgentRoleConfig(
+        name=ProviderName.TOGETHER,
+        model="meta-llama/Llama-3.3-70B-Instruct-Turbo",
+        base_url="https://api.together.xyz/v1",
+    ),
+    ProviderName.FIREWORKS: AgentRoleConfig(
+        name=ProviderName.FIREWORKS,
+        model="accounts/fireworks/models/llama-v3p3-70b-instruct",
+        base_url="https://api.fireworks.ai/inference/v1",
+    ),
+}
+
+DEFAULT_MODELS: dict[ProviderName, str] = {
+    provider_name: defaults.model for provider_name, defaults in PROVIDERS.items()
+}
+
+INSTALL_INSTRUCTIONS: dict[ProviderName, str] = {
+    ProviderName.ANTHROPIC: 'pip install "review-sentinel[anthropic]"',
+    ProviderName.OPENAI: 'pip install "review-sentinel[openai]"',
+    ProviderName.GOOGLE: 'pip install "review-sentinel[google]"',
+}
+
+
+def create_provider(name: str, **kwargs: Any) -> LLMProvider:
+    """
+    Create an LLM provider instance by name.
+
+    Args:
+        name (str): Provider name (e.g. ``"anthropic"``, ``"openai"``,
+            ``"deepseek"``).
+        **kwargs (Any): Additional keyword arguments passed to the provider
+            constructor.
+
+    Returns:
+        LLMProvider: The provider instance.
+
+    Raises:
+        ValueError: If the provider name is not recognized.
+    """
+
+    try:
+        provider: ProviderName = ProviderName(name)
+    except ValueError:
+        available: str = ", ".join(p.value for p in ProviderName)
+
+        raise ValueError(
+            f"Unknown provider: {name!r}. Available: {available}",
+        ) from None
+
+    if provider is ProviderName.ANTHROPIC:
+        from review_sentinel.llm.anthropic import AnthropicProvider
+
+        return AnthropicProvider(**kwargs)
+
+    if provider is ProviderName.GOOGLE:
+        from review_sentinel.llm.google import GoogleProvider
+
+        return GoogleProvider(**kwargs)
+
+    from review_sentinel.llm.openai import OpenAIProvider
+
+    provider_defaults = PROVIDERS[provider]
+    api_key: str = (
+        kwargs.pop("api_key", "")
+        or _env.str(provider_defaults.api_key_env, "")
+        or _env.str("OPENAI_API_KEY", "")
+    )
+    base_url: str | None = kwargs.pop("base_url", None) or provider_defaults.base_url
+
+    return OpenAIProvider(
+        api_key=api_key,
+        base_url=base_url,
+        provider_name=provider,
+        **kwargs,
+    )

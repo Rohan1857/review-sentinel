@@ -1,0 +1,165 @@
+# Environment Variables
+
+Environment variables serve as **overrides** — they always take precedence over values in the [YAML config file](configuration.md#yaml-config-file). For webhook and Kubernetes deployments, the YAML file is the recommended primary configuration method. Environment variables remain the right choice for secrets, CI-provided values, and simple setups without a config file.
+
+Each variable is tagged with the modes where it applies: `webhook` `cli` `ci`.
+
+## Config File
+
+| Variable | Modes | Default | Description |
+|---|---|---|---|
+| `CONFIG_PATH` | `webhook` `cli` | — | Path to a YAML config file. When unset, `config.yaml` in the current working directory is used if it exists |
+
+## Authentication
+
+### GitHub
+
+| Variable | Modes | Default | Description |
+|---|---|---|---|
+| `GITHUB_TOKEN` | `webhook` `cli` | — | GitHub PAT for authentication. Either this or GitHub App credentials are required |
+| `GITHUB_APP_ID` | `webhook` `cli` | — | GitHub App ID (used instead of `GITHUB_TOKEN`) |
+| `GITHUB_APP_PRIVATE_KEY` | `webhook` `cli` | — | Inline PEM-encoded private key for the GitHub App |
+| `GITHUB_APP_PRIVATE_KEY_PATH` | `webhook` `cli` | — | Path to a PEM private key file (alternative to inline) |
+| `GITHUB_INSTALLATION_ID` | `cli` | — | GitHub App installation ID (required for CLI mode with App auth) |
+| `GITHUB_WEBHOOK_SECRET` | `webhook` | — | HMAC secret for GitHub webhook verification |
+
+When both a PAT and a GitHub App are configured, the App takes precedence. See [GitHub authentication](../platforms/github.md#authentication) for setup details.
+
+### GitLab
+
+| Variable | Modes | Default | Description |
+|---|---|---|---|
+| `GITLAB_TOKEN` | `webhook` `cli` | — | GitLab API token for authentication |
+| `GITLAB_WEBHOOK_SECRET` | `webhook` | — | Secret token for GitLab webhook verification |
+| `GITLAB_API_BASE` | `webhook` `cli` | `https://gitlab.com` | GitLab instance URL (for self-hosted) |
+
+## Bot Identity
+
+These can also be set in the YAML config file under `reviewer` and `access`.
+
+| Variable | YAML path | Modes | Default | Description |
+|---|---|---|---|---|
+| `REVIEWER_BOT_USERNAME` | `reviewer.bot_username` | `webhook` | — | The `@mention` name for the reviewer bot |
+| `INLINE_SUGGESTIONS` | `reviewer.inline_suggestions` | `webhook` `cli` `ci` | `true` | Enable inline code suggestions in reviews |
+| `ALLOWED_USERS` | `access.allowed_users` | `webhook` | — | Comma-separated usernames allowed to trigger the bot |
+
+`REVIEWER_BOT_USERNAME` must be set in webhook mode.
+
+## Server
+
+| Variable | YAML path | Modes | Default | Description |
+|---|---|---|---|---|
+| `WEBHOOK_HOST` | `webhook.host` | `webhook` | `0.0.0.0` | Host to bind the server |
+| `WEBHOOK_PORT` | `webhook.port` | `webhook` | `8080` | Port to bind the server |
+
+## Agent
+
+| Variable | YAML path | Modes | Default | Description |
+|---|---|---|---|---|
+| `AGENT_PROVIDER` | `agent.reviewer.provider` | `webhook` `cli` `ci` | — | Reviewer LLM provider (`anthropic`, `openai`, `google`, `deepseek`, `groq`, `together`, `fireworks`). When set in webhook/CLI mode, uses the API runner instead of the Claude Code CLI |
+| `AGENT_MODEL` | `agent.reviewer.model` | `webhook` `cli` `ci` | SDK/provider default | Reviewer model override (e.g. `claude-sonnet-4-6`, `gpt-4.1`) |
+| `AGENT_MAX_TURNS` | `agent.reviewer.max_turns` | `webhook` `cli` `ci` | `8` (CI) / unlimited (webhook, CLI) | Reviewer turn budget. `0` means unlimited. Unset uses the per-mode default: the API runner caps at 8 turns; the Claude Code CLI runner is unlimited (interactive sessions). Set explicitly to cap CLI/webhook reviews |
+| `AGENT_CLI_PATH` | `agent.cli_path` | `webhook` `cli` | Bundled | Path to the `claude` CLI binary (ignored when `AGENT_PROVIDER` is set) |
+| `AGENT_EXPLORER_PROVIDER` | `agent.explorer.provider` | `ci` | Same as reviewer | Explorer sub-agent LLM provider override |
+| `AGENT_EXPLORER_MODEL` | `agent.explorer.model` | `ci` | Same as reviewer | Explorer model override |
+| `AGENT_EXPLORER_MAX_TURNS` | `agent.explorer.max_turns` | `ci` (and `webhook`/`cli` when `AGENT_PROVIDER` is set) | `32` | Explorer sub-agent turn budget. `0` means unlimited; unset uses the bundled default. API-only: explore sub-agents are not spawned by the Claude Code CLI runner |
+
+## Prompts and Guidelines
+
+Each prompt override has two env vars: a `<NAME>` variant for inline content and a `<NAME>_FILE` variant for a path to a file. The name declares the mode — no ambiguity, no filesystem probe.
+
+| Variable | YAML path | Modes | Default | Description |
+|---|---|---|---|---|
+| `REVIEWER_SYSTEM_PROMPT` | `agent.reviewer.system_prompt` | `webhook` `cli` `ci` | Bundled `reviewer_prompt.md` | Reviewer agent system prompt, inline content. Used verbatim. |
+| `REVIEWER_SYSTEM_PROMPT_FILE` | `agent.reviewer.system_prompt_file` | `webhook` `cli` `ci` | — | Path to a file whose contents override the reviewer system prompt. |
+| `EXPLORER_SYSTEM_PROMPT` | `agent.explorer.system_prompt` | `webhook` `cli` `ci` | Bundled `explore/explorer.md` | Explorer sub-agent system prompt, inline content. Used verbatim. |
+| `EXPLORER_SYSTEM_PROMPT_FILE` | `agent.explorer.system_prompt_file` | `webhook` `cli` `ci` | — | Path to a file whose contents override the explorer system prompt. |
+| `CODING_GUIDELINES` | `prompts.coding_guidelines` | `webhook` `cli` `ci` | — | Coding guidelines appended to the reviewer system prompt, inline content. |
+| `CODING_GUIDELINES_FILE` | `prompts.coding_guidelines_file` | `webhook` `cli` `ci` | — | Path to a file whose contents override the coding guidelines. |
+| `LANGUAGE_GUIDELINES_DIR` | `prompts.language_guidelines_dir` | `webhook` `cli` `ci` | `prompts/languages` | Directory containing language-specific guideline files (e.g. `python.md`) |
+
+### Resolution rules
+
+For each prompt, precedence is (highest wins):
+
+1. **`<NAME>_FILE`** — file contents are used. If the path does not point to a readable file, the loader raises `ValueError` and startup fails. A typo in a `_FILE` path is always a hard error, never a silent fallback.
+2. **`<NAME>`** — the raw value is used verbatim as inline content. No filesystem probe is performed.
+3. **Bundled default** — the shipped prompt (if any) is used.
+
+If both `<NAME>` and `<NAME>_FILE` are set, the `_FILE` variant wins and a warning is logged.
+
+See [Prompt File Configuration](configuration.md#prompt-file-configuration) for how these files are loaded and composed.
+
+## Behavior
+
+| Variable | YAML path | Modes | Default | Description |
+|---|---|---|---|---|
+| `ALLOWED_REPOS` | `access.allowed_repos` | `webhook` | — | Comma-separated repository full names to process (e.g. `owner/repo-a,owner/repo-b`). When unset, all repos are accepted |
+| `REVIEWER_TRIGGERS` | `reviewer.triggers` | `webhook` | — | Comma-separated PR lifecycle events that auto-trigger the reviewer (e.g. `pr_opened,pr_push`) |
+| `PR_TITLE_INCLUDE_TAGS` | `access.pr_title_include_tags` | `webhook` | — | Comma-separated allowlist of tags. Only events whose PR title contains `[tag]` are processed |
+| `PR_TITLE_EXCLUDE_TAGS` | `access.pr_title_exclude_tags` | `webhook` | — | Comma-separated blocklist of tags. Events whose PR title contains `[tag]` are skipped |
+| `WORKSPACE_BASE_DIR` | `workspace.base_dir` | `webhook` `cli` | System temp dir | Directory for cloning repos |
+| `IGNORE_EXISTING_COMMENTS` | `ignore_existing_comments` | `webhook` `cli` `ci` | `false` | When `true`, skip fetching existing PR/MR comments so they are not included in the reviewer prompt. Useful for re-running reviews on a PR whose prior review output would otherwise bias the run. |
+| `DRY_RUN_REVIEW` | `dry_run` | `webhook` `cli` `ci` | `false` | When `true`, run the full review pipeline but skip posting comments to the PR/MR. Useful for testing pipeline configuration without surfacing findings. |
+
+See [Repository Filtering](configuration.md#repository-filtering), [Auto-Trigger](configuration.md#auto-trigger), and [PR Title Tag Filtering](configuration.md#pr-title-tag-filtering) for rules and examples.
+
+## Redis
+
+| Variable | YAML path | Modes | Default | Description |
+|---|---|---|---|---|
+| `REDIS_URL` | `redis.url` | `webhook` | — | Redis connection URL. Required when using Kubernetes job runner. Used for job queue serialization, pub/sub completion, and conversation persistence |
+| `REDIS_KEY_TTL_SECONDS` | `redis.key_ttl_seconds` | `webhook` | `86400` | TTL for Redis conversation keys in seconds |
+
+## CI Inputs
+
+CI mode reads its configuration from action inputs (mapped to `INPUT_*` environment variables) and CI-provided variables. These are **not** read from the YAML config file.
+
+| Variable | Modes | Source | Description |
+|---|---|---|---|
+| `ANTHROPIC_API_KEY` | `ci` | Secret | API key for the Anthropic provider |
+| `OPENAI_API_KEY` | `ci` | Secret | API key for the OpenAI provider |
+| `DEEPSEEK_API_KEY` | `ci` | Secret | API key for the DeepSeek provider |
+| `GROQ_API_KEY` | `ci` | Secret | API key for the Groq provider |
+| `TOGETHER_API_KEY` | `ci` | Secret | API key for the Together provider |
+| `FIREWORKS_API_KEY` | `ci` | Secret | API key for the Fireworks provider |
+| `GOOGLE_API_KEY` | `ci` | Secret | API key for the Google provider |
+| `INPUT_PROMPT` | `ci` | Action/template input | Custom review instructions |
+| `GITHUB_TOKEN` | `ci` | Secret / CI | GitHub token (required for GitHub CI) |
+| `GITLAB_TOKEN` | `ci` | Secret / CI | GitLab token (required for GitLab CI) |
+| `GITHUB_EVENT_PATH` | `ci` | GitHub Actions | Path to event payload JSON |
+| `GITHUB_WORKSPACE` | `ci` | GitHub Actions | Repository checkout path |
+| `CI_PROJECT_PATH` | `ci` | GitLab CI | Repository path |
+| `CI_MERGE_REQUEST_IID` | `ci` | GitLab CI | Merge request IID |
+| `CI_MERGE_REQUEST_SOURCE_BRANCH_NAME` | `ci` | GitLab CI | Source branch name |
+| `CI_PROJECT_DIR` | `ci` | GitLab CI | Repository checkout path |
+| `CI_SERVER_URL` | `ci` | GitLab CI | GitLab instance URL (self-hosted) |
+
+See [CI Mode](../modes/ci.md) for full setup instructions.
+
+## Kubernetes
+
+These can also be set in the YAML config file under `kubernetes`. The `kubernetes` section in YAML replaces the need for `JOB_RUNNER=kubernetes` — when `kubernetes.image` is set, the Kubernetes job runner is automatically enabled.
+
+| Variable | YAML path | Modes | Default | Description |
+|---|---|---|---|---|
+| `K8S_IMAGE` | `kubernetes.image` | `webhook` | — | Container image for Job pods. When set (via YAML or env var), enables the Kubernetes job runner |
+| `K8S_NAMESPACE` | `kubernetes.namespace` | `webhook` | `default` | Namespace for spawned Job pods |
+| `K8S_IMAGE_PULL_POLICY` | `kubernetes.image_pull_policy` | `webhook` | — | Image pull policy (`Always`, `Never`, `IfNotPresent`) |
+| `K8S_SERVICE_ACCOUNT` | `kubernetes.service_account` | `webhook` | — | ServiceAccount for Job pods |
+| `K8S_ENV_FROM_SECRETS` | `kubernetes.env_from_secrets` | `webhook` | — | Comma-separated Secret names to mount as env vars in Job pods |
+| `K8S_BACKOFF_LIMIT` | `kubernetes.backoff_limit` | `webhook` | `0` | Job retry attempts |
+| `K8S_ACTIVE_DEADLINE_SECONDS` | `kubernetes.active_deadline_seconds` | `webhook` | `600` | Per-job timeout in seconds |
+| `K8S_TTL_AFTER_FINISHED` | `kubernetes.ttl_after_finished` | `webhook` | `3600` | Seconds before completed Jobs are cleaned up |
+| `K8S_RESOURCE_REQUESTS_CPU` | `kubernetes.resources.requests.cpu` | `webhook` | — | CPU request for Job pods |
+| `K8S_RESOURCE_REQUESTS_MEMORY` | `kubernetes.resources.requests.memory` | `webhook` | — | Memory request for Job pods |
+| `K8S_RESOURCE_LIMITS_CPU` | `kubernetes.resources.limits.cpu` | `webhook` | — | CPU limit for Job pods |
+| `K8S_RESOURCE_LIMITS_MEMORY` | `kubernetes.resources.limits.memory` | `webhook` | — | Memory limit for Job pods |
+
+See [Kubernetes Deployment](../deployment/kubernetes.md) for the full setup guide.
+
+## Logging
+
+| Variable | Modes | Default | Description |
+|---|---|---|---|
+| `LOG_LEVEL` | `webhook` `cli` `ci` | `INFO` | Python log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |

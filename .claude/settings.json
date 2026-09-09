@@ -1,0 +1,14 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd $(git rev-parse --show-toplevel) && python3 scripts/run_checks.py"
+          }
+        ]
+      }
+    ]
+  }
+}

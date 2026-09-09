@@ -1,0 +1,70 @@
+site_name: ReviewSentinel
+site_description: AI-powered code review bot for GitHub PRs and GitLab MRs
+site_url: https://Rohan1857.github.io/review-sentinel/
+repo_url: https://github.com/Rohan1857/review-sentinel
+repo_name: Rohan1857/review-sentinel
+
+theme:
+  name: material
+  palette:
+    - scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+    - scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+  features:
+    - navigation.sections
+    - navigation.expand
+    - search.highlight
+    - search.suggest
+    - content.code.copy
+    - content.tabs.link
+
+nav:
+  - Home: index.md
+  - Getting Started: getting-started.md
+  - Modes:
+      - CI: modes/ci.md
+      - CLI: modes/cli.md
+      - Webhook: modes/webhook.md
+  - Platforms:
+      - GitHub: platforms/github.md
+      - GitLab: platforms/gitlab.md
+  - Review Process: review.md
+  - Reference:
+      - Configuration: reference/configuration.md
+      - Environment Variables: reference/env-vars.md
+  - Architecture: architecture.md
+  - Security: security.md
+  - Deployment:
+      - Overview: deployment/index.md
+      - Standalone: deployment/standalone.md
+      - Kubernetes: deployment/kubernetes.md
+
+plugins:
+  - search
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - tables
+  - toc:
+      permalink: true

@@ -1,0 +1,58 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: review-sentinel-server
+  namespace: review-sentinel
+  labels:
+    app.kubernetes.io/name: review-sentinel
+    app.kubernetes.io/component: server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: review-sentinel
+      app.kubernetes.io/component: server
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: review-sentinel
+        app.kubernetes.io/component: server
+    spec:
+      serviceAccountName: review-sentinel-server
+      containers:
+        - name: server
+          image: ghcr.io/Rohan1857/review-sentinel:latest
+          imagePullPolicy: Always
+          command: ["uv", "run", "--no-sync", "review-sentinel", "serve"]
+          ports:
+            - containerPort: 8080
+          envFrom:
+            - secretRef:
+                name: review-sentinel-secrets
+          env:
+            - name: CONFIG_PATH
+              value: "/etc/review-sentinel/config.yaml"
+          volumeMounts:
+            - name: config
+              mountPath: /etc/review-sentinel
+              readOnly: true
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              memory: 256Mi
+      volumes:
+        - name: config
+          configMap:
+            name: review-sentinel-config
