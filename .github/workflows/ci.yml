@@ -226,7 +226,12 @@ jobs:
         env:
           TEST_GITHUB_TOKEN: ${{ secrets.TEST_GITHUB_TOKEN }}
           GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
-        run: make deploy-ci IMAGE_TAG=${{ github.sha }} REGISTRY=ghcr.io/${{ env.REPO_OWNER }}
+        run: |
+          if [ -z "$TEST_GITHUB_TOKEN" ] || [ -z "$GOOGLE_API_KEY" ]; then
+            echo "Skipping k8s deployment: TEST_GITHUB_TOKEN or GOOGLE_API_KEY not configured"
+          else
+            make deploy-ci IMAGE_TAG=${{ github.sha }} REGISTRY=ghcr.io/${{ env.REPO_OWNER }}
+          fi
 
       - name: Dump cluster diagnostics on failure
         if: failure()
@@ -278,7 +283,7 @@ jobs:
       - run: uv sync
 
       - name: Install cloudflared
-        run: ../scripts/ci/install-cloudflared.sh
+        run: bash ../scripts/ci/install-cloudflared.sh
 
       - name: Webhook server tests
         env:
@@ -301,14 +306,14 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.TEST_GITHUB_TOKEN }}
           TEST_GITLAB_TOKEN: ${{ secrets.TEST_GITLAB_TOKEN }}
-        run: scripts/ci/cleanup-stale-test-resources.sh
+        run: bash scripts/ci/cleanup-stale-test-resources.sh
 
       - name: Delete SHA-tagged images
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           for package in review-sentinel review-sentinel-anthropic review-sentinel-openai review-sentinel-google; do
-            IMAGE_PACKAGE="$package" IMAGE_TAG="${{ github.sha }}" scripts/ci/cleanup-test-image.sh
+            IMAGE_PACKAGE="$package" IMAGE_TAG="${{ github.sha }}" bash scripts/ci/cleanup-test-image.sh
           done
 
   ci:
