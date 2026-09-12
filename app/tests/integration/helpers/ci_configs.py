@@ -5,7 +5,7 @@ from review_sentinel.config import AgentRoleConfig
 from review_sentinel.llm.registry import PROVIDERS
 from review_sentinel.models import ProviderName
 
-DEFAULT_DOCKER_IMAGE = "ghcr.io/Rohan1857/review-sentinel:latest"
+DEFAULT_DOCKER_IMAGE = "ghcr.io/rohan1857/review-sentinel:latest"
 DEFAULT_PROVIDER = "anthropic"
 
 TEST_MODEL_OVERRIDES: dict[ProviderName, str] = {

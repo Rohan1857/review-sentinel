@@ -213,7 +213,13 @@ async def test_kubernetes_job_dispatch(
     container = job_json["spec"]["template"]["spec"]["containers"][0]
 
     assert container["image"] == JOB_IMAGE
-    assert container["command"] == ["uv", "run", "--no-sync", "review-sentinel", "run-job"]
+    assert container["command"] == [
+        "uv",
+        "run",
+        "--no-sync",
+        "review-sentinel",
+        "run-job",
+    ]
 
     payload_env = next(
         (

@@ -40,7 +40,8 @@ def github_token() -> str:
 
     token = os.environ.get("TEST_GITHUB_TOKEN", "")
 
-    assert token, "TEST_GITHUB_TOKEN environment variable is required"
+    if not token:
+        pytest.skip("TEST_GITHUB_TOKEN environment variable not set")
 
     return token
 

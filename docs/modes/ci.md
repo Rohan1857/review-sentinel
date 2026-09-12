@@ -82,7 +82,7 @@ Run automated code reviews on every pull request directly from your CI pipeline.
         coding_guidelines_file: ".review_sentinel/guidelines.md"
     ```
 
-The action uses the all-in-one `ghcr.io/Rohan1857/review-sentinel` image, which works with any provider.
+The action uses the all-in-one `ghcr.io/rohan1857/review-sentinel` image, which works with any provider.
 
 ### Versioning
 
@@ -116,7 +116,7 @@ All inputs except `provider`, `image`, and `github_token` default to empty, whic
 | Input | Default | Description |
 |---|---|---|
 | `provider` | `anthropic` | LLM provider for the reviewer (also the default for the explorer) |
-| `image` | `ghcr.io/Rohan1857/review-sentinel:latest` | Docker image variant (all-in-one; provider-specific images available for smaller footprint) |
+| `image` | `ghcr.io/rohan1857/review-sentinel:latest` | Docker image variant (all-in-one; provider-specific images available for smaller footprint) |
 | `model` | — | Reviewer model. Empty uses the provider's default |
 | `max_turns` | — | Reviewer turn budget. Empty uses the bundled default (`8`); `0` means unlimited |
 | `explorer_provider` | — | Explorer sub-agent provider. Empty inherits from `provider` |
@@ -150,7 +150,7 @@ For each prompt: `*_file` > inline > bundled default. If both are set, the file 
 
 Include the template via `include: remote:` pointed at the raw GitHub
 URL. The examples below pin to `main` to track the latest template
-alongside the `image: ghcr.io/Rohan1857/review-sentinel:latest` default.
+alongside the `image: ghcr.io/rohan1857/review-sentinel:latest` default.
 Pin to a release tag instead (e.g. `.../0.28.0/ci/templates/...`) for
 reproducible builds — the same tag should then pin both the template
 URL and the `image:` input.
@@ -219,7 +219,7 @@ GitLab and cannot be backed by a GitHub repository.
 
     ```yaml
     review-sentinel-review:
-      image: ghcr.io/Rohan1857/review-sentinel:latest
+      image: ghcr.io/rohan1857/review-sentinel:latest
       variables:
         ANTHROPIC_API_KEY: $ANTHROPIC_API_KEY
         GITLAB_TOKEN: $GITLAB_TOKEN
@@ -235,23 +235,23 @@ The job runs on merge request pipelines. It reads `$CI_PROJECT_PATH`, `$CI_MERGE
 
 | Provider | Image |
 |---|---|
-| All providers (default) | `ghcr.io/Rohan1857/review-sentinel` |
-| Anthropic only | `ghcr.io/Rohan1857/review-sentinel-anthropic` |
-| OpenAI-compatible only | `ghcr.io/Rohan1857/review-sentinel-openai` |
-| Google only | `ghcr.io/Rohan1857/review-sentinel-google` |
+| All providers (default) | `ghcr.io/rohan1857/review-sentinel` |
+| Anthropic only | `ghcr.io/rohan1857/review-sentinel-anthropic` |
+| OpenAI-compatible only | `ghcr.io/rohan1857/review-sentinel-openai` |
+| Google only | `ghcr.io/rohan1857/review-sentinel-google` |
 
 ### Versioning
 
 Pin to a specific release tag for stability:
 
 ```yaml
-image: ghcr.io/Rohan1857/review-sentinel:0.1.0
+image: ghcr.io/rohan1857/review-sentinel:0.1.0
 ```
 
 Or use `latest` to track the `main` branch:
 
 ```yaml
-image: ghcr.io/Rohan1857/review-sentinel:latest
+image: ghcr.io/rohan1857/review-sentinel:latest
 ```
 
 ### Template Inputs
@@ -263,7 +263,7 @@ All inputs except `provider`, `image`, and `stage` default to empty, which means
 | Input | Default | Description |
 |---|---|---|
 | `provider` | `anthropic` | LLM provider for the reviewer (also the default for the explorer) |
-| `image` | `ghcr.io/Rohan1857/review-sentinel:latest` | Docker image variant (all-in-one; provider-specific images available for smaller footprint) |
+| `image` | `ghcr.io/rohan1857/review-sentinel:latest` | Docker image variant (all-in-one; provider-specific images available for smaller footprint) |
 | `model` | — | Reviewer model. Empty uses the provider's default |
 | `max_turns` | — | Reviewer turn budget. Empty uses the bundled default (`8`); `0` means unlimited |
 | `explorer_provider` | — | Explorer sub-agent provider. Empty inherits from `provider` |

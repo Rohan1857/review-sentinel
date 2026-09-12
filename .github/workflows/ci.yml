@@ -137,6 +137,9 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Set lowercase repository owner
+        run: echo "REPO_OWNER=${GITHUB_REPOSITORY_OWNER,,}" >> $GITHUB_ENV
+
       - name: Build and push image
         uses: docker/build-push-action@v6
         with:
@@ -147,7 +150,7 @@ jobs:
           build-args: |
             EXTRAS=${{ matrix.extras }}
             SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0+${{ github.sha }}
-          tags: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}:${{ github.sha }}
+          tags: ghcr.io/${{ env.REPO_OWNER }}/${{ matrix.image }}:${{ github.sha }}
 
   integration-test-pipeline:
     needs: [build-image]
@@ -178,10 +181,13 @@ jobs:
 
       - run: uv sync
 
+      - name: Set lowercase repository owner
+        run: echo "REPO_OWNER=${GITHUB_REPOSITORY_OWNER,,}" >> $GITHUB_ENV
+
       - name: Pipeline tests
         env:
           TEST_PIPELINE_ID: ${{ github.sha }}
-          TEST_DOCKER_IMAGE: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}:${{ github.sha }}
+          TEST_DOCKER_IMAGE: ghcr.io/${{ env.REPO_OWNER }}/${{ matrix.image }}:${{ github.sha }}
           TEST_PROVIDER: ${{ matrix.provider }}
           TEST_GITHUB_TOKEN: ${{ secrets.TEST_GITHUB_TOKEN }}
           TEST_GITLAB_TOKEN: ${{ secrets.TEST_GITLAB_TOKEN }}
@@ -212,12 +218,15 @@ jobs:
 
       - run: uv sync
 
+      - name: Set lowercase repository owner
+        run: echo "REPO_OWNER=${GITHUB_REPOSITORY_OWNER,,}" >> $GITHUB_ENV
+
       - name: Deploy to minikube
         working-directory: deploy
         env:
           TEST_GITHUB_TOKEN: ${{ secrets.TEST_GITHUB_TOKEN }}
           GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
-        run: make deploy-ci IMAGE_TAG=${{ github.sha }}
+        run: make deploy-ci IMAGE_TAG=${{ github.sha }} REGISTRY=ghcr.io/${{ env.REPO_OWNER }}
 
       - name: Dump cluster diagnostics on failure
         if: failure()
@@ -249,7 +258,7 @@ jobs:
           TEST_GITHUB_TOKEN: ${{ secrets.TEST_GITHUB_TOKEN }}
           GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
           TEST_PIPELINE_ID: ${{ github.sha }}
-          K8S_IMAGE: ghcr.io/${{ github.repository_owner }}/review-sentinel:${{ github.sha }}
+          K8S_IMAGE: ghcr.io/${{ env.REPO_OWNER }}/review-sentinel:${{ github.sha }}
         run: uv run pytest tests/integration/github/test_kubernetes.py -m integration_kubernetes -v
 
   integration-test-webhook-server:
@@ -338,9 +347,10 @@ jobs:
 
       - name: Retag ${{ matrix.image }}:latest
         run: |
+          REPO_OWNER="${GITHUB_REPOSITORY_OWNER,,}"
           docker buildx imagetools create \
-            --tag ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}:latest \
-            ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}:${{ github.sha }}
+            --tag "ghcr.io/${REPO_OWNER}/${{ matrix.image }}:latest" \
+            "ghcr.io/${REPO_OWNER}/${{ matrix.image }}:${{ github.sha }}"
 
   release:
     needs: [ci]
@@ -362,6 +372,7 @@ jobs:
 
       - name: Retag ${{ matrix.image }}:${{ github.ref_name }}
         run: |
+          REPO_OWNER="${GITHUB_REPOSITORY_OWNER,,}"
           docker buildx imagetools create \
-            --tag ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}:${{ github.ref_name }} \
-            ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}:${{ github.sha }}
+            --tag "ghcr.io/${REPO_OWNER}/${{ matrix.image }}:${{ github.ref_name }}" \
+            "ghcr.io/${REPO_OWNER}/${{ matrix.image }}:${{ github.sha }}"

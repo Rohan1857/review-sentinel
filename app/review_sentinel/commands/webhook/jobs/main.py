@@ -13,7 +13,10 @@ from review_sentinel.commands.webhook.jobs.runner.kubernetes import (
 )
 from review_sentinel.config import Config, load_config
 from review_sentinel.config.settings import DEFAULT_REDIS_KEY_TTL_SECONDS, RedisConfig
-from review_sentinel.conversation.base import ConversationStore, build_conversation_store
+from review_sentinel.conversation.base import (
+    ConversationStore,
+    build_conversation_store,
+)
 from review_sentinel.llm.cost import format_cost_summary
 from review_sentinel.models import ProviderName
 from review_sentinel.platforms import build_platform

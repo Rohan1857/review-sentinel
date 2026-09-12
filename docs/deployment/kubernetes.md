@@ -40,23 +40,23 @@ GitHub/GitLab webhook
 Pre-built images are published to GitHub Container Registry on every merge to `main`:
 
 ```
-ghcr.io/Rohan1857/review-sentinel:latest
-ghcr.io/Rohan1857/review-sentinel:<sha>
+ghcr.io/rohan1857/review-sentinel:latest
+ghcr.io/rohan1857/review-sentinel:<sha>
 ```
 
 Provider-specific images (smaller, single-provider installs) are also available:
 
 ```
-ghcr.io/Rohan1857/review-sentinel-anthropic:latest
-ghcr.io/Rohan1857/review-sentinel-openai:latest
-ghcr.io/Rohan1857/review-sentinel-google:latest
+ghcr.io/rohan1857/review-sentinel-anthropic:latest
+ghcr.io/rohan1857/review-sentinel-openai:latest
+ghcr.io/rohan1857/review-sentinel-google:latest
 ```
 
 To build locally:
 
 ```bash
-make -C deploy build                              # tags as ghcr.io/Rohan1857/review-sentinel:latest
-make -C deploy build IMAGE_TAG=dev                # tags as ghcr.io/Rohan1857/review-sentinel:dev
+make -C deploy build                              # tags as ghcr.io/rohan1857/review-sentinel:latest
+make -C deploy build IMAGE_TAG=dev                # tags as ghcr.io/rohan1857/review-sentinel:dev
 docker build -f ci/Dockerfile -t my-image:v1 .    # fully custom tag
 ```
 
@@ -336,7 +336,7 @@ redis:
   url: "redis://redis.review-sentinel.svc.cluster.local:6379/0"
 
 kubernetes:
-  image: "ghcr.io/Rohan1857/review-sentinel:latest"
+  image: "ghcr.io/rohan1857/review-sentinel:latest"
   namespace: "review-sentinel"
   image_pull_policy: "Always"
   active_deadline_seconds: 600

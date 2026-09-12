@@ -14,9 +14,9 @@ spec:
       description: >
         Docker image to use. The default all-in-one image works with any provider.
         For a smaller footprint, use a provider-specific variant:
-        anthropic -> ghcr.io/Rohan1857/review-sentinel-anthropic:latest,
-        openai/deepseek/groq/together/fireworks -> ghcr.io/Rohan1857/review-sentinel-openai:latest
-      default: "ghcr.io/Rohan1857/review-sentinel:latest"
+        anthropic -> ghcr.io/rohan1857/review-sentinel-anthropic:latest,
+        openai/deepseek/groq/together/fireworks -> ghcr.io/rohan1857/review-sentinel-openai:latest
+      default: "ghcr.io/rohan1857/review-sentinel:latest"
     model:
       description: "Reviewer model (e.g. claude-sonnet-4-20250514, gpt-4.1). Empty uses the provider's default."
       default: ""

@@ -645,9 +645,12 @@ async def _execute_grep(
         search_path = cwd / search_path
 
     import shutil
+
     if shutil.which("grep") is None:
         matches = []
-        target = Path(search_path) if Path(search_path).is_absolute() else cwd / search_path
+        target = (
+            Path(search_path) if Path(search_path).is_absolute() else cwd / search_path
+        )
         if target.is_file():
             files_to_search = [target]
         elif target.is_dir():
@@ -656,12 +659,18 @@ async def _execute_grep(
             files_to_search = []
         for file in files_to_search:
             try:
-                for idx, line in enumerate(file.read_text(encoding="utf-8", errors="ignore").splitlines(), 1):
+                for idx, line in enumerate(
+                    file.read_text(encoding="utf-8", errors="ignore").splitlines(), 1
+                ):
                     if pattern in line:
                         matches.append(f"{file}:{idx}:{line}")
             except Exception:
                 continue
-        return chr(10).join(matches) if matches else f"No matches found for pattern: {pattern}"
+        return (
+            chr(10).join(matches)
+            if matches
+            else f"No matches found for pattern: {pattern}"
+        )
 
     cmd: list[str] = ["grep", "-rn", "--binary-files=without-match"]
 
@@ -757,7 +766,9 @@ async def _execute_bash(
             )
 
     try:
-        import shutil, sys
+        import shutil
+        import sys
+
         bash_exec = None
         if sys.platform == "win32":
             git_path = shutil.which("git")

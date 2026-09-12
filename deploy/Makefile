@@ -1,5 +1,5 @@
 NAMESPACE      := review-sentinel
-REGISTRY       := ghcr.io/Rohan1857
+REGISTRY       ?= ghcr.io/rohan1857
 IMAGE_NAME     := review-sentinel
 IMAGE_TAG      ?= latest
 IMAGE_REF       = $(REGISTRY)/$(IMAGE_NAME):$(IMAGE_TAG)

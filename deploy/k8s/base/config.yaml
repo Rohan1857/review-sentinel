@@ -14,7 +14,7 @@ redis:
   url: "redis://redis.review-sentinel.svc.cluster.local:6379/0"
 
 kubernetes:
-  image: "ghcr.io/Rohan1857/review-sentinel:latest"
+  image: "ghcr.io/rohan1857/review-sentinel:latest"
   namespace: "review-sentinel"
   image_pull_policy: "Always"
   active_deadline_seconds: 600

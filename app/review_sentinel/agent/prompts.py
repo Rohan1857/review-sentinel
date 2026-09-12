@@ -51,9 +51,10 @@ def resolve_guidelines(
     """
     Compose effective guidelines from general and language-specific sources.
 
-    Resolution order for general guidelines: ``.review_sentinel/guidelines.md`` in the
-    repository overrides the default. For each detected language: ``.review_sentinel/{lang}.md``
-    overrides the built-in ``prompts/languages/{lang}.md``.
+    Resolution order for general guidelines: ``.review_sentinel/guidelines.md``
+    in the repository overrides the default. For each detected language:
+    ``.review_sentinel/{lang}.md`` overrides built-in
+    ``prompts/languages/{lang}.md``.
 
     Args:
         repo_path (Path): Absolute path to the repository root.
@@ -162,7 +163,7 @@ def _detect_languages(file_paths: list[Path]) -> set[str]:
 
 def _load_repo_language_guidelines(repo_path: Path, language: str) -> str:
     """
-    Load a language-specific guideline file from the repository's ``.review_sentinel/`` dir.
+    Load language-specific guideline file from repo config.
 
     Looks for ``.review_sentinel/{language}.md`` in the given repo path.
 
@@ -174,7 +175,9 @@ def _load_repo_language_guidelines(repo_path: Path, language: str) -> str:
         str: The guideline content, or empty string if not found.
     """
 
-    full_path: Path = repo_path / REVIEW_SENTINEL_CONFIG_DIR / "languages" / f"{language}.md"
+    full_path: Path = (
+        repo_path / REVIEW_SENTINEL_CONFIG_DIR / "languages" / f"{language}.md"
+    )
 
     if not full_path.is_file():
         return ""

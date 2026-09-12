@@ -3,7 +3,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from review_sentinel.conversation.base import ConversationStore, build_conversation_store
+from review_sentinel.conversation.base import (
+    ConversationStore,
+    build_conversation_store,
+)
 from review_sentinel.conversation.memory import MemoryConversationStore
 
 pytest.importorskip("redis")

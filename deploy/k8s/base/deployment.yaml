@@ -21,7 +21,7 @@ spec:
       serviceAccountName: review-sentinel-server
       containers:
         - name: server
-          image: ghcr.io/Rohan1857/review-sentinel:latest
+          image: ghcr.io/rohan1857/review-sentinel:latest
           imagePullPolicy: Always
           command: ["uv", "run", "--no-sync", "review-sentinel", "serve"]
           ports:

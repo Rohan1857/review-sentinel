@@ -182,17 +182,24 @@ class TestRunCommand:
     @pytest.mark.asyncio
     async def test_run_command_returns_stdout(self, workspace, tmp_path):
         import sys
+
         result = await workspace._run_command(sys.executable, "-c", "print('hello')")
         assert result.strip() == "hello"
 
     @pytest.mark.asyncio
     async def test_run_command_raises_on_nonzero_exit(self, workspace):
         import sys
+
         with pytest.raises(RuntimeError):
-            await workspace._run_command(sys.executable, "-c", "import sys; sys.exit(1)")
+            await workspace._run_command(
+                sys.executable, "-c", "import sys; sys.exit(1)"
+            )
 
     @pytest.mark.asyncio
     async def test_run_command_with_cwd(self, workspace, tmp_path):
         import sys
-        result = await workspace._run_command(sys.executable, "-c", "import os; print(os.getcwd())", cwd=tmp_path)
+
+        result = await workspace._run_command(
+            sys.executable, "-c", "import os; print(os.getcwd())", cwd=tmp_path
+        )
         assert str(tmp_path).lower() in result.lower()

@@ -40,7 +40,8 @@ def gitlab_token() -> str:
 
     token = os.environ.get("TEST_GITLAB_TOKEN", "")
 
-    assert token, "TEST_GITLAB_TOKEN environment variable is required"
+    if not token:
+        pytest.skip("TEST_GITLAB_TOKEN environment variable not set")
 
     return token
 
